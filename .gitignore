@@ -20,6 +20,11 @@ dist/
 *.mp3
 
 # Generated files
-outputs/
-jobs/
+outputs/*
+jobs/*
 temp/
+
+# Keep placeholder files for tracked directories
+!outputs/.gitkeep
+!jobs/.gitkeep
+!test_videos/.gitkeep
