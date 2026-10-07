@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "source_media": {"path": "jobs/abc123/source/input.mp4", "duration": 15.0, "width": 640, "height": 360, "fps": 25.0, "has_audio": true},
+  "project": {"duration": 9.6, "aspect_ratio": "9:16", "width": 720, "height": 1280, "fps": 25.0, "fit": "crop"},
+  "clips": [
+    {"id": "c1", "source_start": 0.12, "source_end": 3.98, "label": "How to edit videos with AI today", "score": 0.78},
+    {"id": "c2", "source_start": 7.07, "source_end": 9.98, "label": "um the biggest tip is pricing", "score": 0.91}
+  ],
+  "audio": {"keep_original": true, "music": true, "music_path": null, "music_volume": 0.18, "ducking": true},
+  "captions": [{"start": 0.08, "end": 2.9, "text": "How to edit videos with AI", "words": []}],
+  "caption_settings": {"enabled": true, "style": "styled"},
+  "effects": [{"type": "punch_in", "clip_id": "c2", "zoom": 1.12}],
+  "transitions": [{"type": "fade", "clip_id": "c2", "duration": 0.25}],
+  "overlays": [],
+  "explanation": ["Selected 2 clip(s); final length 9.6s (target 10s)", "Cut 1 filler word(s)"]
+}

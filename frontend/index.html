@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Video Editing Agent</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --text:#e8eaf0; --mute:#8b93a7; --acc:#6c8cff; --ok:#3ecf8e; --bad:#ff6b6b; --warn:#f5b84b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:980px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:22px; margin:0 0 4px; } .sub { color:var(--mute); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:0 0 12px; }
+  textarea, input[type=file] { width:100%; background:#10131a; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:10px; font:inherit; }
+  textarea { min-height:78px; resize:vertical; }
+  button { background:var(--acc); color:#fff; border:0; border-radius:8px; padding:10px 18px; font:inherit; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .chip { font-size:12px; border:1px solid var(--line); border-radius:99px; padding:3px 10px; color:var(--mute); cursor:pointer; background:#10131a; }
+  .chip:hover { color:var(--text); border-color:var(--acc); }
+  .tracker { display:flex; gap:6px; }
+  .step { flex:1; text-align:center; padding:8px 4px; border-radius:8px; background:#10131a; border:1px solid var(--line); color:var(--mute); font-size:13px; }
+  .step.active { border-color:var(--acc); color:var(--text); animation:pulse 1.2s infinite; }
+  .step.done { border-color:var(--ok); color:var(--ok); }
+  .step.fail { border-color:var(--bad); color:var(--bad); }
+  @keyframes pulse { 50% { background:#1a2140; } }
+  .stages { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:var(--mute); }
+  .stages span { padding:2px 8px; border-radius:6px; background:#10131a; border:1px solid var(--line); }
+  .stages .done { color:var(--ok); } .stages .running { color:var(--acc); } .stages .failed { color:var(--bad); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; }
+  .stat { background:#10131a; border:1px solid var(--line); border-radius:8px; padding:10px; }
+  .stat b { display:block; font-size:18px; } .stat small { color:var(--mute); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mute); font-weight:500; }
+  video { width:100%; max-height:460px; background:#000; border-radius:8px; }
+  .videos { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; }
+  .err { color:var(--bad); } .warn { color:var(--warn); } .mute { color:var(--mute); }
+  ul { margin:6px 0 0 18px; padding:0; } .hidden { display:none; }
+  pre { background:#10131a; border:1px solid var(--line); border-radius:8px; padding:10px; max-height:220px; overflow:auto; font-size:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎬 AI Video Editing Agent</h1>
+  <p class="sub">Video upload karo, prompt likho — agent observe → plan → render → validate karke edited video dega.</p>
+
+  <div class="card">
+    <h2>1. Upload + Instruction</h2>
+    <input id="file" type="file" accept="video/*">
+    <div class="row" style="margin-top:12px"><textarea id="prompt" placeholder="e.g. Make a 45 second reel with captions and background music, remove silence, focus on pricing"></textarea></div>
+    <div class="chips" id="chips"></div>
+    <div class="row" style="margin-top:8px"><label class="mute" for="music">🎵 Background music (optional — mp3/wav/m4a; khali chhodo to built-in track):</label>
+      <input type="file" id="music" accept="audio/*"></div>
+    <div class="row">
+      <button id="go">Edit my video</button>
+      <button id="rerun" class="ghost hidden">Re-run with modified instruction</button>
+      <span id="msg" class="mute"></span>
+    </div>
+  </div>
+
+  <div id="work" class="hidden">
+    <div class="card">
+      <h2>2. Progress</h2>
+      <div class="tracker" id="tracker"></div>
+      <div class="stages" id="stages"></div>
+      <p id="err" class="err"></p>
+      <ul id="warns" class="warn"></ul>
+    </div>
+
+    <div class="card" id="analysisCard">
+      <h2>3. Analysis (OBSERVE)</h2>
+      <div class="grid" id="analysis"></div>
+      <p id="snippet" class="mute"></p>
+      <div id="sourceCaptionsBox" class="hidden" style="margin-top:10px">
+        <div class="row" style="justify-content:space-between">
+          <small class="mute" style="font-weight:600">💬 AUTO-GENERATED CAPTIONS (ORIGINAL VIDEO)</small>
+          <div class="row" style="margin-top:0">
+            <a id="dlSrcSrt"><button class="ghost" style="padding:3px 8px;font-size:11px">⬇ Download .SRT</button></a>
+            <a id="dlSrcVtt"><button class="ghost" style="padding:3px 8px;font-size:11px">⬇ Download .VTT</button></a>
+          </div>
+        </div>
+        <div id="capsList" style="max-height:140px;overflow-y:auto;background:#10131a;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:6px;font-size:13px;line-height:1.6"></div>
+        <details style="margin-top:10px">
+          <summary class="mute" style="cursor:pointer">✏️ Caption galat hai? Yahin theek karo (accurate captions guaranteed)</summary>
+          <div id="segEditor" style="margin-top:8px"></div>
+          <div class="row">
+            <button id="saveSegs">Save corrections &amp; re-run</button>
+            <button id="retrans" class="ghost">Re-transcribe (Whisper dobara)</button>
+            <span id="segMsg" class="mute"></span>
+          </div>
+        </details>
+      </div>
+    </div>
+
+    <div class="card hidden" id="edlCard">
+      <h2>4. Agent ka plan (EDL)</h2>
+      <div id="edlSummary" class="mute"></div>
+      <table><thead><tr><th>#</th><th>Source</th><th>Timeline</th><th>Len</th><th>Text</th><th>FX</th></tr></thead><tbody id="clips"></tbody></table>
+      <ul id="explain"></ul>
+    </div>
+
+    <div class="card hidden" id="outCard">
+      <h2>5. Result</h2>
+      <div class="videos">
+        <div>
+          <div class="row" style="justify-content:space-between;margin:0 0 4px">
+            <span class="mute">Original Video</span>
+            <span id="srcTrackBadge" style="font-size:11px;color:var(--ok)">● Captions synced</span>
+          </div>
+          <video id="vSrc" controls playsinline preload="metadata"></video>
+        </div>
+        <div>
+          <div class="row" style="justify-content:space-between;margin:0 0 4px">
+            <span class="mute">Edited Video</span>
+            <span id="outTrackBadge" style="font-size:11px;color:var(--ok)">● Captions active</span>
+          </div>
+          <video id="vOut" controls playsinline preload="metadata"></video>
+          <small id="audioBadge" class="mute"></small>
+          <div style="height:8px;background:#10131a;border:1px solid var(--line);border-radius:6px;margin-top:6px;overflow:hidden"><div id="meterBar" style="height:100%;width:0;background:#4ade80;transition:width .06s"></div></div>
+          <small id="meterTxt" class="mute">▶ Play karo — yahan live sound level dikhega</small><br>
+          <small id="fileAudio" class="mute"></small>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <a id="dl"><button>⬇ Download edited video</button></a>
+        <a id="dlOutSrt"><button class="ghost">⬇ Edited Subtitles (.srt)</button></a>
+        <a id="dlOutVtt"><button class="ghost">⬇ Edited Subtitles (.vtt)</button></a>
+      </div>
+    </div>
+
+    <div class="card"><h2>Log</h2><pre id="log"></pre></div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let jobId = null, timer = null;
+const STEPS = [["analyzing","Analyzing"],["planning","Planning"],["rendering","Rendering"],["validating","Validating"],["done","Done"]];
+const ORDER = {uploaded:-1,analyzing:0,analyzed:0,planning:1,rendering:2,validating:3,revising:2,exporting:3,done:4,failed:-2};
+const EXAMPLES = ["Make a 30 second Instagram reel with captions","Create a 60 second YouTube video, remove silence and fillers",
+  "Square 1:1 clip, fast and energetic, with background music","Vertical short under 45 seconds focusing on pricing, with zoom",
+  "30 second reel, remove background noise, add music, title: \"Pricing Secrets\""];
+EXAMPLES.forEach(t => { const c = document.createElement("span"); c.className="chip"; c.textContent=t; c.onclick=()=>$("prompt").value=t; $("chips").appendChild(c); });
+
+async function api(path, opts) {
+  const r = await fetch("/api" + path, opts);
+  if (!r.ok) { let d = r.statusText; try { d = (await r.json()).detail || d; } catch(e){} throw new Error(d); }
+  return r.json();
+}
+
+$("go").onclick = async () => {
+  const f = $("file").files[0], p = $("prompt").value.trim();
+  if (!f) return $("msg").textContent = "Pehle video choose karo.";
+  if (!p) return $("msg").textContent = "Instruction likho.";
+  $("go").disabled = true; $("msg").textContent = "Uploading…";
+  const fd = new FormData(); fd.append("file", f); fd.append("instruction", p);
+  if ($("music").files[0]) fd.append("music", $("music").files[0]);
+  try { const j = await api("/jobs", {method:"POST", body:fd}); start(j.id); $("msg").textContent = ""; }
+  catch(e) { $("msg").textContent = e.message; $("go").disabled = false; }
+};
+$("rerun").onclick = async () => {
+  const p = $("prompt").value.trim(); if (!p || !jobId) return;
+  try { if ($("music").files[0]) { const m = new FormData(); m.append("file", $("music").files[0]); await api(`/jobs/${jobId}/music`, {method:"POST", body:m}); }
+        await api(`/jobs/${jobId}/edit`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({instruction:p})});
+        $("outCard").classList.add("hidden"); $("vOut").pause(); poll(); } catch(e) { $("msg").textContent = e.message; }
+};
+// set <video>/<track> src only when it really changes -> no reload loops, no lost audio state
+function setSrcOnce(el, url) {
+  if (el.dataset.key === url) return;
+  el.dataset.key = url; el.src = url; el.load();
+  el.muted = false; el.volume = 1;
+}
+function watchAudio(v, badge) {
+  const check = () => {
+    let has = null;
+    if (v.audioTracks && v.audioTracks.length !== undefined) has = v.audioTracks.length > 0;
+    else if (v.mozHasAudio !== undefined) has = v.mozHasAudio;
+    else if (v.webkitAudioDecodedByteCount !== undefined && v.currentTime > 0.5) has = v.webkitAudioDecodedByteCount > 0;
+    const muted = v.muted || v.volume === 0;
+    badge.textContent = muted ? "🔇 player muted hai — volume badhao" : has === false ? "⚠ browser ko audio track nahi mila" : has ? "🔊 audio OK" : "";
+  };
+  v.addEventListener("loadedmetadata", () => { v.muted = false; if (v.volume === 0) v.volume = 1; check(); });
+  v.addEventListener("volumechange", check); v.addEventListener("timeupdate", check);
+}
+watchAudio($("vOut"), $("audioBadge"));
+// ---- sound check: (1) does the FILE contain audio?  (2) does the BROWSER actually output signal while playing?
+async function fileAudioCheck() {
+  const el = $("fileAudio"); el.textContent = "Checking audio inside the file…";
+  try {
+    const a = await api(`/jobs/${jobId}/audio-check?kind=final`);
+    el.textContent = !a.has_audio ? "❌ " + a.message
+      : `${a.verdict === "ok" ? "✅" : "⚠"} File audio: ${a.codec} ${a.channels}ch ${a.sample_rate}Hz • loudness ${a.lufs ?? "?"} LUFS • peak ${a.peak_db} dB — ${a.message}`;
+  } catch (e) { el.textContent = "Audio check failed: " + e.message; }
+}
+function attachMeter(v, bar, txt) {
+  let ctx = null, an = null, peakSeen = 0, playingSince = 0, raf = 0;
+  const buf = new Float32Array(1024);
+  function setup() {
+    if (ctx) return true;
+    const cap = v.captureStream || v.mozCaptureStream;          // capture = read-only tap, never changes what you hear
+    if (!cap) { txt.textContent = "Live meter is not supported in this browser (file check above still works)."; return false; }
+    const st = cap.call(v);
+    if (!st.getAudioTracks().length) return false;
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    an = ctx.createAnalyser(); an.fftSize = 1024;
+    ctx.createMediaStreamSource(new MediaStream(st.getAudioTracks())).connect(an);   // not connected to speakers
+    return true;
+  }
+  function tick() {
+    if (v.paused || v.ended) { raf = 0; return; }
+    if (an) {
+      an.getFloatTimeDomainData(buf);
+      let pk = 0; for (const x of buf) pk = Math.max(pk, Math.abs(x));
+      peakSeen = Math.max(peakSeen, pk);
+      bar.style.width = Math.min(100, pk * 160) + "%";
+      const db = pk > 0 ? (20 * Math.log10(pk)).toFixed(0) : "-∞";
+      const t = (performance.now() - playingSince) / 1000;
+      if (v.muted || v.volume === 0) txt.textContent = "🔇 Player muted / volume 0 hai — unmute karo";
+      else if (t > 2 && peakSeen < 0.003) txt.textContent = "⚠ Video chal raha hai par browser ko koi sound signal nahi mil raha (decode problem ya player muted).";
+      else txt.textContent = `🔊 Live sound level: ${db} dB` + (peakSeen >= 0.003 ? " — browser mein sound aa raha hai (na sunai de to system volume / output device check karo)" : "");
+    }
+    raf = requestAnimationFrame(tick);
+  }
+  v.addEventListener("playing", () => {
+    playingSince = performance.now(); peakSeen = 0;
+    try { setup(); if (ctx && ctx.state === "suspended") ctx.resume(); } catch (e) { txt.textContent = "Meter error: " + e.message; }
+    if (!raf) raf = requestAnimationFrame(tick);
+  });
+  v.addEventListener("pause", () => { bar.style.width = "0"; });
+}
+attachMeter($("vOut"), $("meterBar"), $("meterTxt"));
+
+
+function setTrack(vidId, trackId, url) {
+  const v = $(vidId);
+  if (!v) return;
+  let tr = $(trackId);
+  if (!tr) {
+    tr = document.createElement("track");
+    tr.id = trackId;
+    tr.kind = "subtitles";
+    tr.srclang = "en";
+    tr.label = "Captions";
+    tr.default = true;
+    v.appendChild(tr);
+  }
+  const base = url.split("&t=")[0];
+  if (tr.dataset.base === base && tr.dataset.job === String(jobId) && !tr.dataset.refresh) return;
+  tr.dataset.base = base; tr.dataset.job = String(jobId); delete tr.dataset.refresh;
+  tr.src = url;
+  setTimeout(() => {
+    try {
+      if (v.textTracks && v.textTracks.length > 0) {
+        v.textTracks[0].mode = "showing";
+      }
+    } catch(e) {}
+  }, 300);
+}
+
+function start(id) {
+  jobId = id;
+  $("work").classList.remove("hidden");
+  setSrcOnce($("vSrc"), `/api/jobs/${id}/video?kind=source`);
+  setTrack("vSrc", "trackSrc", `/api/jobs/${id}/captions?kind=source&format=vtt&t=${Date.now()}`);
+  $("dlSrcSrt").href = `/api/jobs/${id}/captions/download?kind=source&format=srt`;
+  $("dlSrcVtt").href = `/api/jobs/${id}/captions/download?kind=source&format=vtt`;
+  poll();
+}
+function stepOf(stage) {
+  return {observe:0, understand:1, plan:1, act:2, revise:2, inspect:3, export:3}[stage] ?? 0;
+}
+async function poll() { clearTimeout(timer); await refresh(); }
+
+async function refresh() {
+  const j = await api(`/jobs/${jobId}`);
+  const pos = ORDER[j.status] ?? 0;
+  const failedAt = j.status === "failed" ? stepOf(j.stage) : -1;
+  $("tracker").innerHTML = STEPS.map(([k,l],i) => {
+    let cls = "";
+    if (failedAt >= 0) cls = i < failedAt ? "done" : i === failedAt ? "fail" : "";
+    else if (j.status === "done" || i < pos) cls = "done";
+    else if (i === pos) cls = "active";
+    return `<div class="step ${cls}">${l}</div>`; }).join("");
+  $("stages").innerHTML = Object.entries(j.stages).map(([k,v]) => `<span class="${v.status}" title="${v.message||""}">${k}: ${v.status}</span>`).join("");
+  $("err").textContent = j.error ? "❌ " + j.error : "";
+  $("warns").innerHTML = (j.warnings||[]).map(w => `<li>${w}</li>`).join("");
+  if (j.instruction && !$("prompt").value) $("prompt").value = j.instruction;
+  try { const a = await api(`/jobs/${jobId}/analysis`); renderAnalysis(a); } catch(e) {}
+  if (j.stages.plan.status === "done" || j.status === "done") { try { renderEdl(await api(`/jobs/${jobId}/edl/preview`)); } catch(e) {} }
+  if (j.status === "done" && !j.busy) {
+    $("outCard").classList.remove("hidden");
+    const ver = (j.stages.export && j.stages.export.updated) || j.attempts;
+    if ($("vOut").dataset.key !== `/api/jobs/${jobId}/video?kind=final&v=${encodeURIComponent(ver)}`) fileAudioCheck();
+    setSrcOnce($("vOut"), `/api/jobs/${jobId}/video?kind=final&v=${encodeURIComponent(ver)}`);
+    const tOut = $("trackOut"); if (tOut) tOut.dataset.refresh = "1";
+    setTrack("vOut", "trackOut", `/api/jobs/${jobId}/captions?kind=final&format=vtt&v=${encodeURIComponent(ver)}`);
+    $("dl").href = `/api/jobs/${jobId}/download`;
+    $("dlOutSrt").href = `/api/jobs/${jobId}/captions/download?kind=final&format=srt`;
+    $("dlOutVtt").href = `/api/jobs/${jobId}/captions/download?kind=final&format=vtt`;
+  }
+  $("rerun").classList.toggle("hidden", !(j.status === "done" || j.status === "failed" || j.status === "analyzed"));
+  $("go").disabled = j.busy;
+  $("log").textContent = (await api(`/jobs/${jobId}/log`)).lines.join("\n");
+  if (j.busy || !["done","failed","analyzed"].includes(j.status)) timer = setTimeout(refresh, 1500);
+}
+
+function renderAnalysis(a) {
+  const m = a.metadata;
+  $("analysis").innerHTML = [["Duration", m.duration.toFixed(1)+"s"],["Resolution", `${m.width}×${m.height}`],["FPS", m.fps],
+    ["Audio", m.has_audio ? (m.audio_codec||"yes") : "none"],["Scenes", a.scene_count],["Silences", `${a.silence_count} (${a.silence_seconds}s)`],
+    ["Segments", a.segments],["Fillers", a.filler_count]].map(([k,v]) => `<div class="stat"><small>${k}</small><b>${v}</b></div>`).join("");
+  $("snippet").textContent = a.transcript_note ? "⚠ " + a.transcript_note : (a.transcript_snippet ? "“" + a.transcript_snippet + "…”" : "");
+  if (a.captions && a.captions.length) {
+    $("sourceCaptionsBox").classList.remove("hidden");
+    $("capsList").innerHTML = a.captions.map(c => `<div><span class="mute">[${c.start.toFixed(1)}s - ${c.end.toFixed(1)}s]</span> <b>${c.text}</b></div>`).join("");
+    setTrack("vSrc", "trackSrc", `/api/jobs/${jobId}/captions?kind=source&format=vtt&n=${a.captions.length}`);
+  }
+  renderSegEditor(a.transcript_segments || []);
+}
+let segSig = "";
+function renderSegEditor(segs) {
+  const sig = jobId + JSON.stringify(segs);
+  if (sig === segSig || $("segEditor").contains(document.activeElement)) return;
+  segSig = sig;
+  $("segEditor").innerHTML = segs.map((x, i) => `<div class="row" style="margin:4px 0;flex-wrap:nowrap">
+    <input data-k="s" data-i="${i}" value="${x.start.toFixed(2)}" style="width:70px;background:#10131a;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px">
+    <input data-k="e" data-i="${i}" value="${x.end.toFixed(2)}" style="width:70px;background:#10131a;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px">
+    <input data-k="t" data-i="${i}" value="${x.text.replace(/"/g, "&quot;")}" style="flex:1;background:#10131a;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px"></div>`).join("");
+}
+$("saveSegs").onclick = async () => {
+  const rows = {};
+  document.querySelectorAll("#segEditor input").forEach(el => { (rows[el.dataset.i] ||= {})[el.dataset.k] = el.value; });
+  const segments = Object.values(rows).map(r => ({start: parseFloat(r.s), end: parseFloat(r.e), text: r.t}));
+  try {
+    await api(`/jobs/${jobId}/transcript`, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({segments})});
+    $("segMsg").textContent = "Saved ✔ — re-running…"; segSig = "";
+    $("rerun").click();
+  } catch (e) { $("segMsg").textContent = e.message; }
+};
+$("retrans").onclick = async () => {
+  const p = $("prompt").value.trim(); if (!p || !jobId) return;
+  try { await api(`/jobs/${jobId}/edit`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({instruction: p, retranscribe: true})});
+        $("outCard").classList.add("hidden"); segSig = ""; poll(); } catch (e) { $("segMsg").textContent = e.message; }
+};
+function renderEdl(e) {
+  $("edlCard").classList.remove("hidden");
+  $("edlSummary").textContent = `${e.duration}s • ${e.aspect_ratio} (${e.resolution}) • captions: ${e.captions ? "on" : "off"} • music: ${e.music ? "on" : "off"} • noise reduction: ${e.denoise ? "on" : "off"}${e.color_grade ? " • cinematic color: on" : ""}${(e.overlays||[]).length ? " • title: “" + e.overlays[0] + "”" : ""}`;
+  $("clips").innerHTML = e.clips.map((c,i) => `<tr><td>${i+1}</td><td>${c.source}</td><td>${c.timeline_start}</td><td>${c.length}s</td><td>${c.text||"—"}</td><td>${c.zoom?"🔍 ":""}${c.fade_in?"🌫":""}</td></tr>`).join("");
+  $("explain").innerHTML = e.explanation.map(x => `<li>${x}</li>`).join("");
+}
+</script>
+</body>
+</html>
