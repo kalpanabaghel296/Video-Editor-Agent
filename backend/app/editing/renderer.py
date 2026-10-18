@@ -14,6 +14,7 @@ from ..models.edl import EDL
 from ..utils.ffmpeg import FFmpegError, run
 from . import captions as cap
 from . import denoise as dn_mod
+from . import look as look_mod
 from . import music as music_mod
 
 
@@ -199,7 +200,11 @@ def _post_cmd(base: Path, out: Path, edl: EDL, work: Path, cap_mode: Optional[st
     cmd += ["-map", vmap, "-map", amap]
     cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"] if vf else ["-c:v", "copy"]
     cmd += ["-c:a", "aac", "-b:a", "160k"] if music else ["-c:a", "copy"]
-    return cmd + ["-shortest", "-movflags", "+faststart", str(out)]
+    return cmd + [
+    "-t", f"{edl.timeline_duration():.3f}",
+    "-movflags", "+faststart",
+    str(out)
+]
 
 
 def render(edl: EDL, job_dir: Path, level: int = 0) -> RenderResult:
@@ -259,6 +264,12 @@ def render(edl: EDL, job_dir: Path, level: int = 0) -> RenderResult:
             last = e
     if last is not None:
         raise RenderError(f"Base render failed: {last}")
+
+    if level < 3 and not edl.project.look.is_default:      # colour / filters / effects (captions are added after, so they stay clean)
+        try:
+            base = look_mod.apply_look(base, work / "base_look.mp4", edl)
+        except FFmpegError:
+            warnings.append("Look / filters could not be applied — exported without them")
 
     want_caps = level < 3 and edl.caption_settings.enabled and bool(edl.captions)
     want_ov = level < 3 and bool(edl.overlays)

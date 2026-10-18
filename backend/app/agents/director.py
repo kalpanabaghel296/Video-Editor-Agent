@@ -10,6 +10,7 @@ from typing import List, Literal, Optional, Tuple
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 from .. import config
+from ..models.edl import Look
 from ..models.metadata import VideoMetadata
 
 
@@ -23,6 +24,8 @@ class ScriptLine(BaseModel):
 class Requirements(BaseModel):
     caption_script: List[ScriptLine] = Field(default_factory=list)
     sfx: bool = False
+    look: Look = Field(default_factory=Look)    # filters / colour / effects asked for in the prompt
+    asks_edit: bool = False                      # the prompt wants cuts / a length / a window (not only enhancement)
     preserve_timeline: bool = False       # enhance only (noise, colour, music, captions): never drop a frame
     smart_cuts: bool = True               # brain: cut stutters / false starts / retakes
     select_mode: Literal["best", "head"] = "best"   # best = highlight the best parts, head = keep from the start
@@ -132,6 +135,51 @@ def _duration(t: str) -> Optional[float]:
     return dur
 
 
+def parse_look(t: str) -> Look:
+    """Prompt words -> Look (UI sliders can override these later, see planner._merge_look)."""
+    k = Look()
+
+    def num(word: str, default: float) -> float:
+        m = re.search(word + r"\s*(?:to|by|of|at|=|:)?\s*([+-]?\d{1,3})\s*%?", t)
+        if not m:
+            return default
+        v = float(m.group(1))
+        neg = re.search(r"(reduce|decrease|lower|less|drop|cut|dim)\s+(?:the\s+)?" + word, t)
+        return -abs(v) if neg else v
+
+    if re.search(r"black\s*(and|&|n)\s*white|\bb\s*&\s*w\b|\bb/w\b|monochrome|gr[ae]y\s*scale", t): k.preset = "bw"
+    elif re.search(r"\bnoir\b", t): k.preset = "noir"
+    elif re.search(r"vintage|retro|old[- ]film|old school look|nostalgic", t): k.preset = "vintage"
+    elif re.search(r"cinematic|film look|movie look", t): k.preset = "cinematic"
+    elif re.search(r"\bvivid\b|vibrant|punchy colou?rs|pop(ping)? colou?rs", t): k.preset = "vivid"
+    elif re.search(r"\bfaded\b|\bmatte\b|washed[- ]out", t): k.preset = "faded"
+    elif re.search(r"\bcool(er)?\s+(tone|tones|look|colou?rs|filter)|\bcold\s+(tone|look)|blue(ish)?\s+(tone|tint|look)", t): k.preset = "cool"
+    elif re.search(r"\bwarm(er)?\s+(tone|tones|look|colou?rs|filter|feel)|golden\s+(hour|tone)|orange(ish)?\s+(tone|tint)", t): k.preset = "warm"
+
+    if re.search(r"brightness", t) and re.search(r"brightness\s*(?:to|by|of|at|=|:)?\s*[+-]?\d", t):
+        k.brightness = num("brightness", 0)
+    elif re.search(r"much (brighter|more light)|very bright|too dark", t): k.brightness = 50
+    elif re.search(r"brighter|brighten|increase (the )?brightness|more (light|bright)|lighter|lighten|light up", t): k.brightness = 28
+    elif re.search(r"much darker|very dark", t): k.brightness = -50
+    elif re.search(r"darker|darken|reduce (the )?brightness|lower (the )?brightness|dim\b|less bright|too bright", t): k.brightness = -28
+    if re.search(r"contrast\s*(?:to|by|of|at|=|:)?\s*[+-]?\d", t): k.contrast = num("contrast", 0)
+    elif re.search(r"(more|increase|higher|high|strong|boost)\s+(the\s+)?contrast|contrasty|punchier", t): k.contrast = 30
+    elif re.search(r"(less|reduce|lower|low|soft|decrease)\s+(the\s+)?contrast", t): k.contrast = -30
+    if re.search(r"saturation\s*(?:to|by|of|at|=|:)?\s*[+-]?\d", t): k.saturation = num("saturation", 0)
+    elif re.search(r"desaturat|(less|reduce|lower|decrease)\s+(the\s+)?saturation|muted|pale", t): k.saturation = -35
+    elif re.search(r"(more|increase|higher|boost)\s+(the\s+)?saturation|saturated|colou?rful", t): k.saturation = 35
+    if re.search(r"(warmth|temperature)\s*(?:to|by|of|at|=|:)?\s*[+-]?\d", t): k.warmth = num("(?:warmth|temperature)", 0)
+    elif re.search(r"\bwarmer\b|more warmth", t): k.warmth = 30
+    elif re.search(r"\bcooler\b|less warmth|less warm", t): k.warmth = -30
+    if re.search(r"sharpen|sharper|\bcrisp(er)?\b|more clarity|clarity|\bsharpness\b", t): k.sharpen = 50
+    if re.search(r"vignette|dark(ened)? corners|dark edges", t): k.vignette = 50
+    if re.search(r"film grain|\bgrain(y)?\b|\bnoise effect\b", t): k.grain = 40
+    if re.search(r"letter\s*box|cinema bars|black bars|widescreen bars", t): k.letterbox = True
+    if re.search(r"\bmirror|flip (the )?(video|horizontally)|horizontal flip", t): k.mirror = True
+    if re.search(r"fade[- ]?in|fade[- ]?out|fade (from|to) black|fade at (the )?(start|end)", t): k.fade_in_out = True
+    return k
+
+
 def parse_rules(instruction: str) -> Requirements:
     script, instruction = parse_caption_script(instruction)
     t = instruction.lower()
@@ -229,7 +277,9 @@ def parse_rules(instruction: str) -> Requirements:
         r"mistakes?|retakes?|bloopers?|awkward|repetition|repeat\w*)|tighten|jump ?cuts?|shorten|make it (shorter|tighter|crisp)|"
         r"\breels?\b|\bshorts?\b|tik\s*tok|highlights?|summar|trim|\bcut\b|first \d|snappy|punchy|edit.*(properly|professionally)", t))
     wants_len = r.target_duration is not None
-    if (r.denoise or r.music_required or r.color_grade) and not (asks_cut or wants_len or explicit_window):
+    r.look = parse_look(t)
+    r.asks_edit = bool(asks_cut or wants_len or explicit_window)
+    if (r.denoise or r.music_required or r.color_grade or not r.look.is_default) and not (asks_cut or wants_len or explicit_window):
         r.preserve_timeline = True                         # "remove the noise" must never delete frames
     elif not (asks_cut or wants_len or explicit_window or r.platform or r.style == "fast"):
         r.preserve_timeline = bool(re.search(r"caption|subtitle|volume|louder|brighten|grade|colou?r", t))

@@ -32,7 +32,7 @@ from . import config
 from .agents import loop, planner
 from .analysis.pipeline import load_analysis
 from .editing.captions import transcript_to_captions, write_srt, write_vtt
-from .models.edl import EDL
+from .models.edl import EDL, Look
 from .models.transcript import Segment, Transcript, Word
 from .services.jobs import JobStore
 from .utils.ffmpeg import FFmpegError, ffprobe_json, run as ff_run
@@ -119,7 +119,7 @@ def health():
 
 @app.post("/api/jobs")
 async def create_job(file: UploadFile = File(...), instruction: Optional[str] = Form(None),
-                     music: Optional[UploadFile] = File(None)):
+                     music: Optional[UploadFile] = File(None), look: Optional[str] = Form(None)):
     ext = Path(file.filename or "").suffix.lower()
     if ext not in config.ALLOWED_EXT:
         raise HTTPException(400, f"Unsupported file type '{ext}'. Allowed: {sorted(config.ALLOWED_EXT)}")
@@ -129,6 +129,11 @@ async def create_job(file: UploadFile = File(...), instruction: Optional[str] = 
         shutil.copyfileobj(file.file, f)
     if music is not None and music.filename:
         _save_music(job_id, music)
+    if look:
+        try:
+            _save_look(job_id, Look(**json.loads(look)))
+        except Exception:
+            raise HTTPException(400, "look must be valid JSON with the Look fields")
     if instruction and instruction.strip():
         _submit(job_id, loop.run_agent, store, job_id, instruction.strip())
     else:
@@ -212,6 +217,28 @@ def _save_music(job_id: str, up: UploadFile) -> str:
         shutil.copyfileobj(up.file, f)
     store.log(job_id, f"Background music uploaded: {up.filename}")
     return up.filename or f"music{ext}"
+
+
+def _save_look(job_id: str, look: Look) -> None:
+    assets = store.path(job_id) / "assets"
+    assets.mkdir(exist_ok=True)
+    (assets / "look.json").write_text(look.model_dump_json(indent=2), encoding="utf-8")
+    store.log(job_id, "Look & effects: " + (look.describe() or "none"))
+
+
+@app.put("/api/jobs/{job_id}/look")
+def put_look(job_id: str, look: Look):
+    """Filters / brightness / contrast / effects chosen in the UI (applied on the next run)."""
+    _job(job_id)
+    _save_look(job_id, look)
+    return look
+
+
+@app.get("/api/jobs/{job_id}/look")
+def get_look(job_id: str):
+    _job(job_id)
+    f = store.path(job_id) / "assets" / "look.json"
+    return Look(**json.loads(f.read_text(encoding="utf-8"))) if f.exists() else Look()
 
 
 @app.post("/api/jobs/{job_id}/music")

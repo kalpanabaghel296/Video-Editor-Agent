@@ -4,10 +4,12 @@ Scores transcript segments (hooks, substance, keywords, filler ratio), selects t
 ones within the target duration, cuts silences / filler words inside them, then writes
 clips, captions, effects, transitions and a human-readable explanation into the EDL.
 """
+import json
 import re
 from typing import List, Optional, Tuple
 from pathlib import Path
 from ..analysis.fumbles import detect_fumbles
+from ..models.edl import Look
 from ..editing.captions import build_captions, script_to_captions
 from ..models.analysis import AnalysisBundle
 from ..models.edl import (EDL, AudioSettings, CaptionSettings, Clip, Effect, Overlay,
@@ -175,8 +177,34 @@ def _user_music(source_path: str) -> Optional[str]:
     return None
 
 
+def _merge_look(req: Requirements, source_path: str) -> Tuple[Look, bool]:
+    """prompt look + the sliders / filters chosen in the UI (jobs/<id>/assets/look.json). UI values win.
+    -> (look, ui_look_used)"""
+    look = req.look.model_copy()
+    f = Path(source_path).parent.parent / "assets" / "look.json"
+    if not f.exists():
+        return look, False
+    try:
+        ui = Look(**json.loads(f.read_text(encoding="utf-8")))
+    except Exception:
+        return look, False
+    if ui.is_default:
+        return look, False
+    base = Look()
+    for k in Look.model_fields:
+        v = getattr(ui, k)
+        if v != getattr(base, k):
+            setattr(look, k, v)
+    return look, True
+
+
 def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
     meta, dur = an.metadata, an.metadata.duration
+    look, ui_look = _merge_look(req, source_path)
+    if ui_look and not req.asks_edit and not req.preserve_timeline:
+        # only styling was chosen in the UI -> never drop a frame
+        req.preserve_timeline = True
+        req.remove_silence = req.remove_fillers = req.smart_cuts = False
     win_s = max(req.target_start, 0.0) if req.target_start is not None else 0.0
     win_e = min(req.target_end, dur) if req.target_end is not None else dur
     window: Interval = (win_s, win_e)
@@ -293,7 +321,7 @@ def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
                                  fps=meta.fps, has_audio=meta.has_audio),
         project=ProjectSettings(duration=0, aspect_ratio=req.aspect_ratio, width=w, height=h,
                                 fps=min(max(meta.fps, 24), 60), fit=req.fit,
-                                color_grade=req.color_grade),
+                                color_grade=req.color_grade, look=look),
         clips=clips,
         audio=AudioSettings(music=req.music_required, ducking=meta.has_audio,
                             denoise=req.denoise and meta.has_audio, denoise_level=req.denoise_level,
@@ -323,6 +351,8 @@ def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
     # explainability
     kept = edl.project.duration
     ex = []
+    if not look.is_default:
+        ex.append(f"Look & effects applied: {look.describe()}")
     if req.preserve_timeline:
         ex.append("Kept every frame of the video (no cuts) — only enhancements were applied")
     elif dur - kept > 0.05:
@@ -430,4 +460,5 @@ def edl_preview(edl: EDL) -> dict:
             "resolution": f"{edl.project.width}x{edl.project.height}", "captions": edl.caption_settings.enabled,
             "music": edl.audio.music, "denoise": edl.audio.denoise,
             "color_grade": getattr(edl.project, "color_grade", False),
+            "look": edl.project.look.describe(),
             "overlays": [o.text for o in edl.overlays], "clips": rows, "explanation": edl.explanation}

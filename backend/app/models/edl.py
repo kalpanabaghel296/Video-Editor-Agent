@@ -30,6 +30,41 @@ class Clip(BaseModel):
         return self.source_end - self.source_start
 
 
+LookPreset = Literal["none", "cinematic", "warm", "cool", "bw", "noir", "vintage", "vivid", "faded"]
+
+
+class Look(BaseModel):
+    """Colour / style of the whole video. All sliders are -100..100 (sharpen / vignette / grain 0..100)."""
+    preset: LookPreset = "none"
+    brightness: float = Field(0.0, ge=-100, le=100)
+    contrast: float = Field(0.0, ge=-100, le=100)
+    saturation: float = Field(0.0, ge=-100, le=100)
+    warmth: float = Field(0.0, ge=-100, le=100)        # -100 cool ... +100 warm
+    sharpen: float = Field(0.0, ge=0, le=100)
+    vignette: float = Field(0.0, ge=0, le=100)
+    grain: float = Field(0.0, ge=0, le=100)
+    fade_in_out: bool = False                           # fade from / to black
+    letterbox: bool = False                             # cinema bars
+    mirror: bool = False                                # horizontal flip
+
+    @property
+    def is_default(self) -> bool:
+        return self == Look()
+
+    def describe(self) -> str:
+        parts = [] if self.preset == "none" else [self.preset.upper()]
+        for k in ("brightness", "contrast", "saturation", "warmth"):
+            v = getattr(self, k)
+            if v:
+                parts.append(f"{k} {v:+.0f}")
+        for k in ("sharpen", "vignette", "grain"):
+            v = getattr(self, k)
+            if v:
+                parts.append(f"{k} {v:.0f}")
+        parts += [n for n, on in (("fade in/out", self.fade_in_out), ("letterbox", self.letterbox), ("mirror", self.mirror)) if on]
+        return ", ".join(parts)
+
+
 class ProjectSettings(BaseModel):
     duration: float = 0.0
     aspect_ratio: AspectRatio = "original"
@@ -38,6 +73,7 @@ class ProjectSettings(BaseModel):
     fps: float = 30.0
     fit: Literal["crop", "pad"] = "crop"
     color_grade: bool = False
+    look: Look = Field(default_factory=Look)
 
 
 class SfxEvent(BaseModel):
