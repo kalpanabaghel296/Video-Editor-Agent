@@ -16,6 +16,7 @@ from . import captions as cap
 from . import denoise as dn_mod
 from . import look as look_mod
 from . import music as music_mod
+from . import reframe as reframe_mod
 
 
 class RenderError(RuntimeError):
@@ -59,13 +60,27 @@ def build_base_cmd(edl: EDL, out: Path, use_effects: bool, denoise: bool = False
     p, n = edl.project, len(edl.clips)
     W, H = p.width, p.height
     zoom = {e.clip_id: e.zoom for e in edl.effects} if use_effects else {}
+    reframes = {r.clip_id: r for r in edl.reframes if r.points} if use_effects else {}      # face-aware crop paths
+    fit = p.fit if (p.fit != "blur" or use_effects) else "crop"                              # blur fill is an "effect"
     fades_in = {t.clip_id: t.duration for t in edl.transitions if t.type == "fade"} if use_effects else {}
     has_a = edl.source_media.has_audio and edl.audio.keep_original
     parts, labels = [], []
     for i, c in enumerate(edl.clips):
         d = c.duration
-        v = f"[0:v]trim=start={c.source_start:.3f}:end={c.source_end:.3f},setpts=PTS-STARTPTS"
-        v += _fit(W, H, p.fit, p.aspect_ratio)
+        head = f"[0:v]trim=start={c.source_start:.3f}:end={c.source_end:.3f},setpts=PTS-STARTPTS"
+        axis, _win = reframe_mod.crop_geometry(edl.source_media.width, edl.source_media.height, W, H)
+        if fit == "blur" and p.aspect_ratio != "original" and axis is not None:
+            # sharp copy fitted inside the frame, a blurred + darkened copy fills the bars behind it
+            parts.append(f"{head},split=2[s{i}a][s{i}b]")
+            parts.append(f"[s{i}a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+                         f"boxblur=24:6,eq=brightness=-0.06[bg{i}]")
+            parts.append(f"[s{i}b]scale={W}:{H}:force_original_aspect_ratio=decrease[fg{i}]")
+            v = f"[bg{i}][fg{i}]overlay=(W-w)/2:(H-h)/2"
+        elif c.id in reframes and p.aspect_ratio != "original" and fit == "crop" and axis == reframes[c.id].axis:
+            rf = reframes[c.id]
+            v = f"{head},{reframe_mod.crop_filter(rf.axis, rf.points, W, H)},scale={W}:{H}"   # window follows the face
+        else:
+            v = head + _fit(W, H, "crop" if fit == "blur" else fit, p.aspect_ratio)
         if c.id in zoom:
             z = max(1.0, min(zoom[c.id], 2.0))
             v += f",crop=iw/{z}:ih/{z},scale={W}:{H}"
@@ -166,7 +181,7 @@ def _post_cmd(base: Path, out: Path, edl: EDL, work: Path, cap_mode: Optional[st
         cmd += ["-i", str(music)]
     fc, vf, vmap, amap = [], [], "0:v", "0:a?"
     if cap_mode == "styled":
-        cap.write_ass(edl.captions, work / "captions.ass", p.width, p.height)
+        cap.write_ass(edl.captions, work / "captions.ass", p.width, p.height, edl.caption_settings)
         vf.append("ass=captions.ass")
     elif cap_mode == "plain":
         cap.write_srt(edl.captions, work / "captions.srt")
@@ -216,7 +231,8 @@ def render(edl: EDL, job_dir: Path, level: int = 0) -> RenderResult:
     if not edl.clips:
         raise RenderError("EDL has no clips")
     base, draft = work / "base.mp4", out_dir / "draft.mp4"
-    has_effects = bool(edl.effects or edl.transitions or getattr(edl.project, "color_grade", False))
+    has_effects = bool(edl.effects or edl.transitions or getattr(edl.project, "color_grade", False)
+                       or edl.reframes or edl.project.fit == "blur")
     want_dn = level < 3 and edl.audio.denoise and edl.source_media.has_audio
     clean_wav: Optional[Path] = None
     if want_dn:                                           # audio-only noise removal; video + timeline stay untouched

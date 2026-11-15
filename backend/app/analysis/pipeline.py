@@ -117,8 +117,10 @@ def load_analysis(job_dir: Path) -> AnalysisBundle:
     tr = Transcript(**j("transcript.json", {}))
     sil = [Silence(**x) for x in j("silence.json", [])]
     fil = [Filler(**x) for x in j("fillers.json", [])]
+    src = next(iter(sorted((job_dir / "source").glob("input.*"))), None)
     try:                                                   # the editor's brain: pauses, stutters, retakes ...
-        fum = fumbles.detect_fumbles(tr, sil, fil, meta.duration)
+        fum = fumbles.detect_fumbles(tr, sil, fil, meta.duration, audio_path=src if meta.has_audio else None,
+                                     energy_cache=a / "take_energy.json")
     except Exception:
         fum = []
     return AnalysisBundle(metadata=meta, transcript=tr, scenes=[Scene(**x) for x in j("scenes.json", [])],

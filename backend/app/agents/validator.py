@@ -139,9 +139,9 @@ def patch(edl: EDL, meta: VideoMetadata, req: Optional[Requirements] = None,
     edl.audio.sfx_events = [e for e in edl.audio.sfx_events if 0 <= e.time < edl.project.duration - 0.05]
     if edl.caption_settings.enabled and req and req.caption_script:
         from ..editing.captions import script_to_captions
-        edl.captions = script_to_captions(req.caption_script, edl.project.duration)
+        edl.captions = script_to_captions(req.caption_script, edl.project.duration, edl.caption_settings)
     elif edl.caption_settings.enabled and transcript is not None:
-        edl.captions = build_captions(edl.clips, transcript)       # keep captions in sync with clips
+        edl.captions = build_captions(edl.clips, transcript, edl.caption_settings)       # keep captions in sync with clips
     else:
         edl.captions = [c for c in edl.captions if 0 <= c.start < c.end <= edl.project.duration + 0.5]
     return edl, applied

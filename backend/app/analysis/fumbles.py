@@ -16,8 +16,12 @@ import re
 from difflib import SequenceMatcher
 from typing import List, Tuple
 
+from pathlib import Path
+from typing import Optional
+
 from ..models.analysis import Filler, Fumble, Silence
 from ..models.transcript import Transcript
+from . import takes as takes_mod
 
 LONG_PAUSE = 1.0          # pauses >= this are dead air
 MID_PAUSE = 0.6           # pauses >= this are shortened when style is fast / smart cut is aggressive
@@ -58,7 +62,8 @@ def _shorten(start: float, end: float, keep: float) -> Tuple[float, float]:
 
 
 def detect_fumbles(tr: Transcript, silences: List[Silence], fillers: List[Filler], duration: float,
-                   aggressive: bool = False) -> List[Fumble]:
+                   aggressive: bool = False, audio_path: Optional[Path] = None,
+                   energy_cache: Optional[Path] = None) -> List[Fumble]:
     out: List[Fumble] = []
     words = _words(tr)
 
@@ -116,13 +121,20 @@ def detect_fumbles(tr: Transcript, silences: List[Silence], fillers: List[Filler
                                   kind="false_start", confidence=0.85,
                                   reason=f"phrase repeated: “{' '.join(a_)}” at {words[i][1]:.1f}s (first try cut)"))
 
-    # 5. retakes: two consecutive sentences that say (almost) the same thing -> drop the first
-    segs = [s for s in tr.segments if s.end > s.start and s.text.strip()]
-    for a, b in zip(segs, segs[1:]):
-        ta, tb = " ".join(_norm(x) for x in a.text.split()), " ".join(_norm(x) for x in b.text.split())
-        if len(ta.split()) >= 3 and b.start - a.end <= RETAKE_WINDOW and SequenceMatcher(None, ta, tb).ratio() >= RETAKE_SIM:
-            out.append(Fumble(start=round(a.start, 3), end=round(max(b.start - 0.05, a.end), 3), kind="retake",
-                              confidence=0.8, reason=f"re-take: “{a.text.strip()[:50]}” was said again at {b.start:.1f}s"))
+    # 5. retakes: the speaker said the same line 2+ times -> keep the BEST take, cut the others
+    #    (analysis/takes.py scores fluency, completeness, pace and audio level; later takes get a small bonus)
+    try:
+        units, groups = takes_mod.analyze(tr, audio_path, energy_cache)
+        for g in groups:
+            for (s, e, i) in g.cuts:
+                out.append(Fumble(start=s, end=e, kind="retake", confidence=0.8, reason=g.reasons[i]))
+    except Exception:                                  # never let take analysis kill the whole brain
+        segs = [s for s in tr.segments if s.end > s.start and s.text.strip()]
+        for a, b in zip(segs, segs[1:]):
+            ta, tb = " ".join(_norm(x) for x in a.text.split()), " ".join(_norm(x) for x in b.text.split())
+            if len(ta.split()) >= 3 and b.start - a.end <= RETAKE_WINDOW and SequenceMatcher(None, ta, tb).ratio() >= RETAKE_SIM:
+                out.append(Fumble(start=round(a.start, 3), end=round(max(b.start - 0.05, a.end), 3), kind="retake",
+                                  confidence=0.8, reason=f"re-take: “{a.text.strip()[:50]}” was said again at {b.start:.1f}s"))
 
     # 6. hard filler words (um / uh ...) with exact timing
     for f in fillers:

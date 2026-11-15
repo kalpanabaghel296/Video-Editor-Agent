@@ -1,18 +1,25 @@
 """Captions: build timeline captions from the transcript + EDL clips, write SRT / ASS."""
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 from ..models.edl import Caption, CaptionWord, Clip
 from ..models.transcript import Transcript
 
 MAX_WORDS = 7
 MAX_SECONDS = 2.8
+# words per caption block / max seconds per block, per caption preset
+CHUNKING = {"classic": (7, 2.8), "hormozi": (3, 1.6), "minimal": (6, 3.0), "boxed": (6, 2.8), "karaoke": (5, 2.2)}
 
 
-def _chunk(words: List[CaptionWord]) -> List[List[CaptionWord]]:
+def chunk_params(preset: str = "classic", max_words: Optional[int] = None) -> Tuple[int, float]:
+    mw, ms = CHUNKING.get(preset, CHUNKING["classic"])
+    return (max_words or mw), ms
+
+
+def _chunk(words: List[CaptionWord], max_words: int = MAX_WORDS, max_seconds: float = MAX_SECONDS) -> List[List[CaptionWord]]:
     chunks, cur = [], []
     for w in words:
         cur.append(w)
-        if len(cur) >= MAX_WORDS or (w.end - cur[0].start) >= MAX_SECONDS or w.text.endswith((".", "?", "!")):
+        if len(cur) >= max_words or (w.end - cur[0].start) >= max_seconds or w.text.endswith((".", "?", "!")):
             chunks.append(cur)
             cur = []
     if cur:
@@ -20,8 +27,9 @@ def _chunk(words: List[CaptionWord]) -> List[List[CaptionWord]]:
     return chunks
 
 
-def build_captions(clips: List[Clip], tr: Transcript) -> List[Caption]:
-    """Map transcript onto the output timeline (after cuts)."""
+def build_captions(clips: List[Clip], tr: Transcript, settings=None) -> List[Caption]:
+    """Map transcript onto the output timeline (after cuts). `settings` (CaptionSettings) picks the block size."""
+    mw, ms = chunk_params(getattr(settings, "preset", "classic"), getattr(settings, "max_words", None))
     caps: List[Caption] = []
     offset = 0.0
     for c in clips:
@@ -47,7 +55,7 @@ def build_captions(clips: List[Clip], tr: Transcript) -> List[Caption]:
                     ns = offset + max(s, c.source_start) - c.source_start
                     ne = offset + min(e, c.source_end) - c.source_start
                     words.append(CaptionWord(text=text, start=round(ns, 3), end=round(max(ne, ns + 0.05), 3)))
-        for ch in _chunk(words):
+        for ch in _chunk(words, mw, ms):
             caps.append(Caption(start=ch[0].start, end=ch[-1].end,
                                 text=" ".join(w.text for w in ch), words=ch))
         offset += c.duration
@@ -58,9 +66,10 @@ def build_captions(clips: List[Clip], tr: Transcript) -> List[Caption]:
     return caps
 
 
-def script_to_captions(script, total: float) -> List[Caption]:
+def script_to_captions(script, total: float, settings=None) -> List[Caption]:
     """Captions the user dictated in the prompt (timed on the OUTPUT timeline).
     Long lines are split into <=MAX_WORDS chunks with word timing spread over the line."""
+    mw, ms = chunk_params(getattr(settings, "preset", "classic"), getattr(settings, "max_words", None))
     caps: List[Caption] = []
     for ln in script:
         s0, e0 = max(ln.start, 0.0), min(ln.end, total) if total else ln.end
@@ -73,7 +82,7 @@ def script_to_captions(script, total: float) -> List[Caption]:
             d = (e0 - s0) * (len(tok) + 1) / weight
             words.append(CaptionWord(text=tok, start=round(t, 3), end=round(t + d, 3)))
             t += d
-        for ch in _chunk(words):
+        for ch in _chunk(words, mw, ms):
             caps.append(Caption(start=ch[0].start, end=ch[-1].end, text=" ".join(w.text for w in ch), words=ch))
     for a, b in zip(caps, caps[1:]):
         if a.end > b.start:
@@ -147,29 +156,79 @@ def _clean(s: str) -> str:
     return s.replace("{", "(").replace("}", ")").replace("\n", " ")
 
 
-def write_ass(caps: List[Caption], path: Path, width: int, height: int) -> Path:
-    """Styled captions: bold, outlined, with word-level karaoke highlight when word times exist."""
-    size = max(24, int(min(width, height) * 0.075))
-    margin_v = int(height * 0.12)
+_ASS_FORMAT = ("Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,"
+               "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,"
+               "MarginV,Encoding\n")
+SIZE_K = {"small": 0.8, "normal": 1.0, "large": 1.25}
+# colours are &HAABBGGRR
+_STYLES = {
+    # classic = the original look: yellow sweep over white, Arial bold
+    "classic": dict(size=0.075, bold=-1, primary="&H0000E5FF", secondary="&H00FFFFFF", outline="&H00000000",
+                    back="&H64000000", border=1, outline_w=3, shadow=1, mode="sweep", upper=False, font="Arial"),
+    # hormozi = big bold ALL CAPS, 2-3 words at a time, the spoken word turns yellow
+    "hormozi": dict(size=0.098, bold=-1, primary="&H00FFFFFF", secondary="&H00FFFFFF", outline="&H00000000",
+                    back="&H00000000", border=1, outline_w=7, shadow=0, mode="active", upper=True, font="Arial Black",
+                    highlight="&H0000E5FF"),
+    "minimal": dict(size=0.052, bold=0, primary="&H00FFFFFF", secondary="&H00FFFFFF", outline="&H00000000",
+                    back="&H80000000", border=1, outline_w=2, shadow=1, mode="plain", upper=False, font="Arial"),
+    # boxed = white text on a semi-transparent dark box
+    "boxed": dict(size=0.062, bold=-1, primary="&H00FFFFFF", secondary="&H00FFFFFF", outline="&H96000000",
+                  back="&H96000000", border=3, outline_w=9, shadow=0, mode="plain", upper=False, font="Arial"),
+    # karaoke = word-by-word green sweep
+    "karaoke": dict(size=0.08, bold=-1, primary="&H0060FF40", secondary="&H00FFFFFF", outline="&H00000000",
+                    back="&H64000000", border=1, outline_w=4, shadow=1, mode="sweep", upper=False, font="Arial"),
+}
+
+
+def has_devanagari(text: str) -> bool:
+    return any("\u0900" <= ch <= "\u097f" for ch in text)
+
+
+def pick_font(caps: List[Caption], style: dict, override: Optional[str] = None) -> str:
+    """Arial doesn't have Devanagari glyphs -> use Nirmala UI (ships with Windows) for Hindi script."""
+    if override:
+        return override
+    if any(has_devanagari(c.text) for c in caps):
+        return "Nirmala UI"
+    return style["font"]
+
+
+def write_ass(caps: List[Caption], path: Path, width: int, height: int, settings=None) -> Path:
+    """Styled captions. `settings` (CaptionSettings) chooses preset / size / safe-zone margin / font."""
+    preset = getattr(settings, "preset", "classic") or "classic"
+    st = _STYLES.get(preset, _STYLES["classic"])
+    size = max(22, int(min(width, height) * st["size"] * SIZE_K.get(getattr(settings, "size", "normal"), 1.0)))
+    default_margin = 0.18 if height > width else 0.12            # vertical video: stay clear of the app's UI
+    margin_v = int(height * (getattr(settings, "margin_pct", None) or default_margin))
+    font = pick_font(caps, st, getattr(settings, "font", None))
     head = (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {width}\nPlayResY: {height}\nWrapStyle: 0\n\n"
-        "[V4+ Styles]\n"
-        "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,"
-        "Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\n"
-        f"Style: Default,Arial,{size},&H0000E5FF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,3,1,2,40,40,{margin_v},1\n\n"
+        "[V4+ Styles]\n" + _ASS_FORMAT +
+        f"Style: Default,{font},{size},{st['primary']},{st['secondary']},{st['outline']},{st['back']},{st['bold']},0,0,0,"
+        f"100,100,0,0,{st['border']},{st['outline_w']},{st['shadow']},2,40,40,{margin_v},1\n\n"
         "[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
     )
+
+    def fix(s: str) -> str:
+        s = _clean(s)
+        return s.upper() if st["upper"] else s
+
     rows = []
     for c in caps:
-        if c.words:
-            parts = []
-            for w in c.words:
-                cs = max(1, int(round((w.end - w.start) * 100)))
-                parts.append(f"{{\\kf{cs}}}{_clean(w.text)}")
-            text = " ".join(parts)
+        ws = c.words
+        if st["mode"] == "active" and ws:
+            for i, w in enumerate(ws):                            # one event per spoken word, that word highlighted
+                end = ws[i + 1].start if i + 1 < len(ws) else max(c.end, w.end)
+                end = max(end, w.start + 0.06)
+                txt = " ".join(("{\\c&H" + st["highlight"][-6:] + "&}" + fix(x.text) + "{\\c&H" + st["primary"][-6:] + "&}") if j == i
+                               else fix(x.text) for j, x in enumerate(ws))
+                rows.append(f"Dialogue: 0,{_ass_time(w.start)},{_ass_time(end)},Default,,0,0,0,,{txt}")
+            continue
+        if st["mode"] == "sweep" and ws:
+            text = " ".join(f"{{\\kf{max(1, int(round((w.end - w.start) * 100)))}}}{fix(w.text)}" for w in ws)
         else:
-            text = _clean(c.text)
+            text = fix(c.text)
         rows.append(f"Dialogue: 0,{_ass_time(c.start)},{_ass_time(c.end)},Default,,0,0,0,,{text}")
     path.write_text(head + "\n".join(rows) + "\n", encoding="utf-8")
     return path

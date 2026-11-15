@@ -8,11 +8,13 @@ import json
 import re
 from typing import List, Optional, Tuple
 from pathlib import Path
+from ..analysis import reference as reference_mod
 from ..analysis.fumbles import detect_fumbles
+from ..editing import reframe as reframe_mod
 from ..models.edl import Look
 from ..editing.captions import build_captions, script_to_captions
 from ..models.analysis import AnalysisBundle
-from ..models.edl import (EDL, AudioSettings, CaptionSettings, Clip, Effect, Overlay,
+from ..models.edl import (EDL, AudioSettings, CaptionSettings, Clip, Effect, Overlay, Reframe,
                           ProjectSettings, SfxEvent, SourceMedia, Transition)
 from ..models.transcript import Segment
 from .director import Requirements
@@ -136,9 +138,12 @@ def subtract_all(base: List[Interval], cuts: List[Interval]) -> List[Interval]:
     return [x for x in out if x[1] - x[0] > 0.02]
 
 
-def _brain_cuts(req: Requirements, an: AnalysisBundle, win: Interval):
+def _brain_cuts(req: Requirements, an: AnalysisBundle, win: Interval, source_path: Optional[str] = None):
     """Turn the brain's findings (analysis/fumbles.py) into cut intervals according to what the prompt allows."""
-    fum = detect_fumbles(an.transcript, an.silences, an.fillers, an.metadata.duration, aggressive=(req.style == "fast")) \
+    audio = Path(source_path) if (source_path and an.metadata.has_audio) else None
+    cache = Path(source_path).parent.parent / "analysis" / "take_energy.json" if source_path else None
+    fum = detect_fumbles(an.transcript, an.silences, an.fillers, an.metadata.duration, aggressive=True,
+                         audio_path=audio, energy_cache=cache) \
         if req.style == "fast" else an.fumbles
     allowed = set()
     if req.remove_silence:
@@ -198,8 +203,72 @@ def _merge_look(req: Requirements, source_path: str) -> Tuple[Look, bool]:
     return look, True
 
 
+def _assets(source_path: str) -> Path:
+    return Path(source_path).parent.parent / "assets"
+
+
+def _ui_caption_style(source_path: str) -> dict:
+    """caption look chosen in the UI (jobs/<id>/assets/caption_style.json); only non-default choices are stored"""
+    f = _assets(source_path) / "caption_style.json"
+    try:
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    except Exception:
+        return {}
+
+
+def _apply_reference(req: Requirements, source_path: str, dur: float) -> List[str]:
+    """reference-video style (jobs/<id>/assets/reference.json, written by POST /api/jobs/<id>/reference)"""
+    f = _assets(source_path) / "reference.json"
+    if not f.exists():
+        return []
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        prof, opts = data["profile"], data.get("options", {})
+        if not data.get("enabled", True):
+            return []
+        src_look = None
+        if {**reference_mod.DEFAULT_OPTS, **opts}["look"]:
+            try:
+                src_look = reference_mod.look_stats(Path(source_path))
+            except Exception:
+                src_look = None
+        return reference_mod.apply_to_requirements(req, prof, src_look, opts, dur)
+    except Exception:
+        return []
+
+
+ZOOM_LEVEL = {"subtle": 1.06, "normal": 1.12, "strong": 1.22}
+
+
+def _reframes(edl: EDL, req: Requirements, source_path: str) -> Tuple[List[Reframe], List[str]]:
+    """Face-aware crop paths for every clip (only when a wide video is cropped to 9:16 / 1:1)."""
+    p = edl.project
+    if p.aspect_ratio == "original" or p.fit != "crop" or req.reframe not in ("auto", "face"):
+        return [], []
+    axis, _ = reframe_mod.crop_geometry(edl.source_media.width, edl.source_media.height, p.width, p.height)
+    if axis is None:
+        return [], []
+    if not reframe_mod.available():
+        return [], ["Face tracking unavailable (OpenCV face detector not installed) — centre crop used"]
+    out, ratios = [], []
+    for c in edl.clips:
+        try:
+            r = reframe_mod.track_clip(Path(source_path), c.source_start, c.source_end, edl.source_media.width,
+                                       edl.source_media.height, p.width, p.height)
+        except Exception:
+            r = None
+        if r:
+            out.append(Reframe(clip_id=c.id, axis=r[0], points=r[1], face_ratio=r[2]))
+            ratios.append(r[2])
+    if out:
+        return out, [f"Face-aware framing: followed the speaker in {len(out)} of {len(edl.clips)} clip(s) "
+                     f"(face found in {sum(ratios) / len(ratios) * 100:.0f}% of sampled frames)"]
+    return [], ["No face found for reframing — centre crop used"]
+
+
 def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
     meta, dur = an.metadata, an.metadata.duration
+    req.notes += _apply_reference(req, source_path, dur)             # reference style first: the prompt still wins
     look, ui_look = _merge_look(req, source_path)
     if ui_look and not req.asks_edit and not req.preserve_timeline:
         # only styling was chosen in the UI -> never drop a frame
@@ -208,7 +277,7 @@ def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
     win_s = max(req.target_start, 0.0) if req.target_start is not None else 0.0
     win_e = min(req.target_end, dur) if req.target_end is not None else dur
     window: Interval = (win_s, win_e)
-    used_fumbles, brain_cuts = _brain_cuts(req, an, window)
+    used_fumbles, brain_cuts = _brain_cuts(req, an, window, source_path)
     removed_fillers = sum(1 for f in used_fumbles if f.kind == "filler")
     cuts: List[Interval] = merge(brain_cuts, 0.0)
 
@@ -315,23 +384,27 @@ def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
     if req.zoom or req.sfx:
         clips = split_at_phrases(clips, an, req)
 
+    ui_cap = _ui_caption_style(source_path)
     w, h = resolution_for(req.aspect_ratio, meta.width, meta.height, req)
     edl = EDL(
         source_media=SourceMedia(path=source_path, duration=dur, width=meta.width, height=meta.height,
                                  fps=meta.fps, has_audio=meta.has_audio),
         project=ProjectSettings(duration=0, aspect_ratio=req.aspect_ratio, width=w, height=h,
-                                fps=min(max(meta.fps, 24), 60), fit=req.fit,
+                                fps=min(max(meta.fps, 24), 60), fit=("blur" if req.reframe == "blur" else req.fit),
                                 color_grade=req.color_grade, look=look),
         clips=clips,
         audio=AudioSettings(music=req.music_required, ducking=meta.has_audio,
                             denoise=req.denoise and meta.has_audio, denoise_level=req.denoise_level,
                             music_style=req.music_style, music_path=_user_music(source_path)),
-        caption_settings=CaptionSettings(enabled=req.caption_required, style="styled"),
+        caption_settings=CaptionSettings(
+            enabled=req.caption_required, style="styled",
+            preset=ui_cap.get("preset") or (req.caption_style if req.caption_style != "auto" else "classic"),
+            size=ui_cap.get("size") or req.caption_size, margin_pct=req.caption_margin),
         requirements=req.model_dump(),
     )
     edl.project.duration = edl.timeline_duration()
     if req.zoom:
-        edl.effects = [Effect(clip_id=c.id, zoom=1.12) for i, c in enumerate(clips) if i % 2 == 1]
+        edl.effects = [Effect(clip_id=c.id, zoom=ZOOM_LEVEL[req.zoom_strength]) for i, c in enumerate(clips) if i % 2 == 1]
     if req.transitions:
         for prev, c in zip(clips, clips[1:]):
             if c.source_start - prev.source_end > 1.0:    # fade only across real jumps
@@ -341,12 +414,13 @@ def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
                                 position="center")]
     if req.caption_required:
         if req.caption_script:                                # captions dictated in the prompt win
-            edl.captions = script_to_captions(req.caption_script, edl.project.duration)
+            edl.captions = script_to_captions(req.caption_script, edl.project.duration, edl.caption_settings)
         else:
-            edl.captions = build_captions(edl.clips, an.transcript)
+            edl.captions = build_captions(edl.clips, an.transcript, edl.caption_settings)
     if req.sfx:
         edl.audio.sfx = True
         edl.audio.sfx_events = build_sfx(edl)
+    edl.reframes, reframe_notes = _reframes(edl, req, source_path)
 
     # explainability
     kept = edl.project.duration
@@ -365,7 +439,11 @@ def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
     else:
         ex.append("No transcript available — planned from speech/silence regions only")
     if req.aspect_ratio != "original":
-        ex.append(f"Converted to {req.aspect_ratio} ({w}x{h}, {req.fit})")
+        ex.append(f"Converted to {req.aspect_ratio} ({w}x{h}, {edl.project.fit})")
+    ex += reframe_notes
+    ex += [f"Style: {n}" for n in req.notes]
+    if req.caption_required and edl.caption_settings.preset != "classic":
+        ex.append(f"Caption look: {edl.caption_settings.preset}, {edl.caption_settings.size} size")
     if req.caption_required:
         src_txt = "from the caption script in your prompt" if req.caption_script else "from the transcript"
         ex.append(f"Added {len(edl.captions)} caption block(s) {src_txt}")
@@ -391,6 +469,8 @@ def split_at_phrases(clips: List[Clip], an: AnalysisBundle, req: Requirements,
     """Split long contiguous clips at phrase boundaries so punch-in zooms / whoosh SFX have cuts to land on.
     Boundaries come from the dictated caption script, else transcript segment ends and word gaps.
     The split is contiguous (no frames dropped) so audio stays in sync."""
+    if getattr(req, "shot_len", None):                      # reference pace: clip length follows the reference's shot length
+        min_len, max_len = max(1.0, req.shot_len * 0.7), max(req.shot_len * 1.4, 1.8)
     cut_pts: List[float] = []
     if req.caption_script:
         off = 0.0                                             # script is on the OUTPUT timeline -> source time
@@ -461,4 +541,6 @@ def edl_preview(edl: EDL) -> dict:
             "music": edl.audio.music, "denoise": edl.audio.denoise,
             "color_grade": getattr(edl.project, "color_grade", False),
             "look": edl.project.look.describe(),
+            "caption_style": edl.caption_settings.preset, "fit": edl.project.fit,
+            "reframe": [{"clip": r.clip_id, "face_ratio": r.face_ratio, "axis": r.axis} for r in edl.reframes],
             "overlays": [o.text for o in edl.overlays], "clips": rows, "explanation": edl.explanation}

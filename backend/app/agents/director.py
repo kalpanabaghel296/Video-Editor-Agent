@@ -51,11 +51,19 @@ class Requirements(BaseModel):
     cut_bloopers: bool = False
     title: Optional[str] = None
     keywords: List[str] = Field(default_factory=list)
+    # --- week 7 ---
+    caption_style: Literal["auto", "classic", "hormozi", "minimal", "boxed", "karaoke"] = "auto"
+    caption_size: Literal["small", "normal", "large"] = "normal"
+    caption_margin: Optional[float] = None                  # bottom safe zone (fraction of height), set by platform presets
+    zoom_strength: Literal["subtle", "normal", "strong"] = "normal"
+    reframe: Literal["auto", "face", "center", "blur"] = "auto"    # how a wide video is cropped for 9:16 / 1:1
+    shot_len: Optional[float] = None                        # wanted average shot length in seconds (reference style)
+    notes: List[str] = Field(default_factory=list)          # preset / reference notes for the explanation
     source: str = "rules"
 
 
 _PLATFORMS = [  # (regex, platform, aspect)
-    (r"youtube\s*shorts?|\bshorts?\b", "shorts", "9:16"),
+    (r"youtube\s*shorts?|yt\s*shorts?|\bshorts\b", "shorts", "9:16"),    # NOT the plain word "short" ("make it short")
     (r"\breels?\b|instagram\s*reels?", "reels", "9:16"),
     (r"tik\s*tok", "tiktok", "9:16"),
     (r"instagram\s*(post|feed)", "instagram_post", "1:1"),
@@ -180,9 +188,50 @@ def parse_look(t: str) -> Look:
     return k
 
 
+# Hinglish / typo normaliser: maps common Hindi-in-Roman phrasing to the English wording the rules understand.
+# Order matters (caption-size phrases first, so "caption chhote" is not read as "make it shorter").
+_HINGLISH = [
+    (r"\b(captions?|subtitles?|text|font)\s+(?:chh?ot[ae]|chh?oti|choti|small|smaller|tiny)\b", "small captions"),
+    (r"\b(?:chh?ot[ae]|chh?oti|choti|small|smaller|tiny)\s+(?:captions?|subtitles?|text|font)\b", "small captions"),
+    (r"\b(?:captions?|subtitles?|text|font)\s+(?:bad[ae]|badi|big|bigger|large|larger|huge|zyada|jyada)\b", "large captions"),
+    (r"\b(?:bad[ae]|badi|big|bigger|large|larger|huge)\s+(?:captions?|subtitles?|text|font)\b", "large captions"),
+    (r"\b(?:hata\s*do|hata\s*de|hata\s*dena|hata\s*dijiye|hatao|hataao|hata|htao|hta\s*do|nikal\s*do|nikaal\s*do|nikal\s*de|"
+     r"nikalo|nikaalo|kaat\s*do|kaat\s*de|kaato|kaat|mita\s*do|delete\s*kar\s*do)\b", "remove"),
+    (r"\b(?:galti(?:yan|yaan|yon)?|ghalti|galat)\b", "mistakes"),
+    (r"\b(?:ruk[\s-]*ruk\s*(?:ke|kar)|atak\w*|hakl\w*|latpat\w*)\b", "stutter"),
+    (r"\b(?:chup+i|chup+|khamoshi|sannata)\b", "silence"),
+    (r"\b(?:chh?ota|chh?oti|chh?ote)\s*(?:kar|kr)\s*(?:do|de|dena|karo)?\b", "shorter"),
+    (r"\b(?:chh?ota|chh?oti|chh?ote)\b", "shorter"),
+    (r"\bshort\s*(?:kar|kr)\s*(?:do|de|dena|karo)?\b", "shorter"),
+    (r"\b(?:lamba|lambi|lambe)\b", "longer"),
+    (r"\b(?:laga\s*do|laga\s*de|lagao|laga|dal\s*do|daal\s*do|dalo|jod\s*do)\b", "add"),
+    (r"\b(?:bina|bagair)\b", "without"),
+    (r"\btez\b", "fast"),
+    (r"\b(?:dheema|dheere|aaram\s*se)\b", "slow"),
+    (r"\b(?:gaana|gana)\b", "music"),
+    (r"\b(?:sekand|sekend|sec)\b", "seconds"),
+    (r"\b(?:kaala|kala)\s*(?:aur|and|&)?\s*safed\b", "black and white"),
+    (r"\bchehr[ae]\b", "face"),
+]
+_NEG = r"(?:remove|no|without|mat|stop|skip|disable|turn\s+off|don'?t\s+(?:add|use|want)|nahi|nhi)"
+
+
+def normalize_text(t: str) -> str:
+    """Hinglish -> English rule vocabulary (input is already lower-case)."""
+    for pat, rep in _HINGLISH:
+        t = re.sub(pat, rep, t)
+    return t
+
+
+def _neg(t: str, word: str) -> bool:
+    """True when the feature `word` (regex) is switched OFF: 'no zoom', 'without music', 'zoom remove / off / band'."""
+    return bool(re.search(r"\b" + _NEG + r"\s+(?:the\s+|any\s+|all\s+)?(?:background\s+)?" + word, t)
+                or re.search(word + r"\s+(?:remove|off|band|disable|mat\b|nahi|nhi)", t))
+
+
 def parse_rules(instruction: str) -> Requirements:
     script, instruction = parse_caption_script(instruction)
-    t = instruction.lower()
+    t = normalize_text(instruction.lower())
     r = Requirements()
     r.caption_script = script
     dur, start_t, end_t = _parse_time_range(t)
@@ -197,7 +246,8 @@ def parse_rules(instruction: str) -> Requirements:
     if start_t is not None and end_t is not None:           # explicit trim window = "cut exactly this part"
         r.remove_silence = False
         r.remove_fillers = False
-    r.sfx = bool(re.search(r"\bsfx\b|sound effects?|whoosh|\bpop\b|\bding\b|chime|mouse click|notification", t))
+    r.sfx = bool(re.search(r"\bsfx\b|sound effects?|whoosh|\bpop\b|\bding\b|chime|mouse click|notification", t)) \
+        and not _neg(t, r"(?:sfx|sound effects?|whoosh)")
 
     for pat, name, aspect in _PLATFORMS:
         if re.search(pat, t):
@@ -225,13 +275,13 @@ def parse_rules(instruction: str) -> Requirements:
         elif w_val == h_val:
             r.aspect_ratio = "1:1"
 
-    neg_cap = re.search(r"(no|without|bina|mat)\s+(captions?|subtitles?)", t)
+    neg_cap = _neg(t, r"(?:captions?|subtitles?)")
     if neg_cap:
         r.caption_required = False
     else:
         r.caption_required = True
     r.music_required = bool(re.search(r"music|bgm|soundtrack|background (track|song|score)|lo-?fi|\bbeats?\b", t)) and \
-        not re.search(r"(no|without|bina)\s+(background\s+)?(music|bgm)", t)
+        not _neg(t, r"(?:music|bgm|soundtrack)")
     if re.search(r"upbeat|energetic|energy|fast|pump|hype|party|happy", t):
         r.music_style = "fast"
     elif re.search(r"calm|chill|soft|relax|lo-?fi|soothing|peaceful|slow|emotional|cinematic", t):
@@ -241,7 +291,35 @@ def parse_rules(instruction: str) -> Requirements:
         r.style = "fast"
     elif re.search(r"calm|slow|relax|soft|cinematic", t):
         r.style = "calm"
-    r.zoom = bool(re.search(r"zoom|punch|close-?up|medium close|centered|speaker in a", t)) or r.style == "fast"
+    zoom_off = _neg(t, r"(?:zoom(?:s|ing)?(?:[- ]?ins?)?|punch[- ]?ins?)")
+    r.zoom = (bool(re.search(r"zoom|punch|close-?up|medium close|centered|speaker in a", t)) or r.style == "fast") and not zoom_off
+    if re.search(r"(?:less|lesser|low|subtle|slight|thoda|kam)\s+zoom|zoom\s+(?:kam|less|subtle|slight|thoda|low)", t):
+        r.zoom_strength = "subtle"
+    elif re.search(r"(?:more|extra|strong|heavy|zyada|jyada|bahut|deep)\s+zoom|zoom\s+(?:zyada|jyada|more|strong)", t):
+        r.zoom_strength = "strong"
+    # caption look (the UI can override these later, see planner)
+    if re.search(r"hormozi|viral\s+(?:style\s+)?captions?|bold\s+captions?|mr\.?\s*beast", t):
+        r.caption_style = "hormozi"
+    elif re.search(r"karaoke|word[- ]by[- ]word|highlight(?:ed)?\s+words?", t):
+        r.caption_style = "karaoke"
+    elif re.search(r"box(?:ed)?\s+captions?|captions?\s+(?:in|with)\s+(?:a\s+)?box|background\s+box", t):
+        r.caption_style = "boxed"
+    elif re.search(r"minimal(?:ist)?\s+captions?|simple\s+captions?|clean\s+captions?|subtle\s+captions?", t):
+        r.caption_style = "minimal"
+    elif re.search(r"classic\s+captions?|default\s+captions?", t):
+        r.caption_style = "classic"
+    if re.search(r"\bsmall captions\b|small(?:er)?\s+(?:captions?|subtitles?)", t):
+        r.caption_size = "small"
+    elif re.search(r"\blarge captions\b|(?:big|bigger|large|larger)\s+(?:captions?|subtitles?)", t):
+        r.caption_size = "large"
+    # how a wide video becomes vertical / square
+    if re.search(r"blur(?:red)?\s+(?:background|bg|fill|sides?|bars?)|background\s+blur|blurred?\s+(?:sides|bars)", t):
+        r.reframe, r.fit = "blur", "pad"
+    elif re.search(r"center[- ]?crop|centre[- ]?crop|no\s+(?:face\s+)?track(?:ing)?|don'?t\s+track", t):
+        r.reframe = "center"
+    elif re.search(r"\bface\b|follow\s+(?:me|my|the)\b|track(?:ing)?\s+(?:me|my|the)\s+(?:face|speaker)|"
+                   r"keep\s+(?:me|the\s+speaker)\s+(?:in|centou?red)|speaker\s+in\s+(?:the\s+)?(?:frame|centre|center)", t):
+        r.reframe = "face"
     r.transitions = bool(re.search(r"transition|fade", t))
     if re.search(r"letterbox|black bars|\bpad(ding)?\b|no crop", t):
         r.fit = "pad"
@@ -275,7 +353,7 @@ def parse_rules(instruction: str) -> Requirements:
     asks_cut = bool(re.search(
         r"(remove|cut|trim out|delete|skip|drop)\s+(the\s+)?(all\s+)?(long\s+)?(silence|pauses?|dead air|fillers?|fumbl\w*|stutter\w*|"
         r"mistakes?|retakes?|bloopers?|awkward|repetition|repeat\w*)|tighten|jump ?cuts?|shorten|make it (shorter|tighter|crisp)|"
-        r"\breels?\b|\bshorts?\b|tik\s*tok|highlights?|summar|trim|\bcut\b|first \d|snappy|punchy|edit.*(properly|professionally)", t))
+        r"\breels?\b|\bshorts?\b|\bshorter\b|\bshorten\b|tik\s*tok|highlights?|summar|trim|\bcut\b|first \d|snappy|punchy|edit.*(properly|professionally)", t))
     wants_len = r.target_duration is not None
     r.look = parse_look(t)
     r.asks_edit = bool(asks_cut or wants_len or explicit_window)
@@ -356,6 +434,14 @@ def _llm_json(prompt: str) -> Optional[str]:
 
 
 def understand(instruction: str, meta: VideoMetadata) -> Requirements:
+    """Prompt -> Requirements (rules or LLM), then platform presets fill in what the prompt left open."""
+    from . import presets
+    req = _understand(instruction, meta)
+    req.notes += presets.apply(req, meta.duration)
+    return req
+
+
+def _understand(instruction: str, meta: VideoMetadata) -> Requirements:
     if config.LLM_PROVIDER != "none":
         raw = _llm_json(_PROMPT % (meta.duration, meta.width, meta.height, instruction))
         if raw:
@@ -372,6 +458,10 @@ def understand(instruction: str, meta: VideoMetadata) -> Requirements:
                     req.target_duration = rules.target_duration
                     req.remove_silence, req.remove_fillers = rules.remove_silence, rules.remove_fillers
                 req.sfx = req.sfx or rules.sfx
+                for f, default in (("caption_style", "auto"), ("caption_size", "normal"),
+                                   ("zoom_strength", "normal"), ("reframe", "auto")):    # style words are rule-parsed
+                    if getattr(rules, f) != default:
+                        setattr(req, f, getattr(rules, f))
                 req.source = config.LLM_PROVIDER
                 return req
             except (ValidationError, AttributeError, ValueError):

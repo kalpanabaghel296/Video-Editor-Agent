@@ -92,6 +92,11 @@
   .menubtn { display:none; }
   @media (max-width:1180px) { .app { grid-template-columns:minmax(0,1fr) 360px; } .side { display:none; } .side.show { display:block; position:fixed; z-index:50; top:54px; left:0; bottom:0; width:260px; box-shadow:var(--shadow); } .menubtn { display:inline-block; } }
   @media (max-width:860px) { .brand small, #healthTxt { display:none; } .brand b { font-size:13px; } .tbtn { padding:6px 9px; font-size:12px; white-space:nowrap; } .top { padding:0 10px; gap:8px; } .actions { position:sticky; bottom:0; z-index:30; box-shadow:0 -8px 20px #0006; } body { overflow:auto; } .app { display:block; height:auto; } .main { overflow:visible; } .panel { border-left:0; border-top:1px solid var(--line); } .stage.both { grid-template-columns:1fr; } .vbox video { max-height:44vh; } .vbox, .hero { min-height:0; } .pane { overflow:visible; } .top { position:sticky; top:0; z-index:40; } }
+  .banner { margin:0 0 12px; padding:10px 14px; border-radius:10px; border:1px solid var(--warn); background:#f5b84b18; font-size:13px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .msg { padding:7px 11px; border-radius:10px; margin:6px 0; font-size:13px; max-width:92%; width:fit-content; } .msg.user { background:#2a376a; color:#fff; margin-left:auto; } .msg.agent { background:var(--card); border:1px solid var(--line); }
+  [data-theme=light] .msg.user { background:#e4e9ff; color:#1b2455; }
+  #chatLog { max-height:190px; overflow:auto; } .chatbox { display:flex; gap:8px; margin-top:10px; } .chatbox .inp { flex:1; min-width:0; }
+  .takeline { margin:6px 0; font-size:12px; color:var(--mute); } .takeline .chip { margin:2px 4px 2px 0; } .optrow { display:flex; gap:12px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:var(--mute); } .optrow label { display:flex; gap:5px; align-items:center; cursor:pointer; }
 </style>
 </head>
 <body>
@@ -112,6 +117,7 @@
   </aside>
 
   <main class="main" id="main">
+    <div class="banner hidden" id="ffBanner"><span id="ffMsg"></span><button class="gbtn" id="ffRecheck" style="padding:4px 12px">↻ Re-check</button></div>
     <div class="stagebar">
       <div class="seg" id="views" role="tablist">
         <button data-v="orig" class="on">Original</button><button data-v="edit" disabled>Edited</button><button data-v="both" disabled>Side by side</button>
@@ -165,10 +171,18 @@
       </div>
     </div>
 
+    <div class="card hidden" id="chatCard">
+      <h4>💬 Chat revise <span class="sp"></span><span class="dim" style="text-transform:none;letter-spacing:0;font-weight:400">bolo kya badalna hai — agent wahi change karke re-render karega</span></h4>
+      <div class="chips" id="chatSuggest" style="margin-bottom:8px"></div>
+      <div id="chatLog"></div>
+      <div class="chatbox"><input class="inp" id="chatIn" placeholder="e.g. zoom kam karo · caption chhote karo · 20 second me karo · music hata do"><button class="pbtn" id="chatSend">Send</button></div>
+    </div>
+
     <div class="card hidden" id="anCard">
       <h4>Analysis (observe)</h4>
       <div class="chips" id="anChips"></div>
       <p class="mute" id="anNote" style="margin:10px 0 0;font-size:12px"></p>
+      <div id="takesBox" class="hidden"></div>
     </div>
 
     <div class="card hidden" id="logCard"><details id="logDet"><summary>Agent log</summary><pre id="log" style="margin-top:8px"></pre></details></div>
@@ -180,10 +194,15 @@
       <button class="tab" data-tab="audio">🎵 Audio</button><button class="tab" data-tab="caps">💬 Captions</button>
     </div>
     <div class="pane on" id="pane-prompt">
+      <div class="sech">Platform <span style="text-transform:none;letter-spacing:0;font-weight:400">(size + caption look + safe zone)</span></div><div class="chips" id="platforms"></div>
       <div class="sech">Instruction</div>
       <textarea id="prompt" placeholder="e.g. Make a 30 second vertical reel with captions and calm background music, remove pauses and mistakes"></textarea>
       <div class="sech">Quick add</div><div class="chips" id="quick"></div>
       <div class="sech">Examples</div><div class="chips" id="examples"></div>
+      <div class="sech">Reference video <span style="text-transform:none;letter-spacing:0;font-weight:400">(edit like this reel)</span></div>
+      <div class="filebox"><span>🎯</span><input type="file" id="refFile" accept="video/*"></div>
+      <p class="mute" style="font-size:12px;margin:8px 0 0">Koi reel jaisi tumhe pasand ho upload karo — uska pace (cut kitni jaldi), format aur colour look tumhare video par lagta hai. Prompt mein jo likhoge wo hamesha jeetega.</p>
+      <div id="refBox" class="hidden" style="margin-top:10px"></div>
     </div>
     <div class="pane" id="pane-look">
       <div class="sech">Filter</div><div class="presets" id="presets"></div>
@@ -202,6 +221,10 @@
       <p class="mute" style="font-size:12px;margin:0">Edited video ke neeche live meter aur file-level audio check dikhta hai, taaki UI mein hi pata chale sound sahi hai ya nahi.</p>
     </div>
     <div class="pane" id="pane-caps">
+      <div class="sech">Caption look <span style="text-transform:none;letter-spacing:0;font-weight:400">(burned into the edited video)</span></div>
+      <div class="chips" id="capPresets"></div>
+      <div class="sech">Size</div><div class="chips" id="capSizes"></div>
+      <p class="mute" style="font-size:12px;margin:8px 0 0">Auto = prompt / platform decide (jaise “hormozi captions” ya Instagram Reel). Yahan kuch chuna to wahi jeetega. Hindi script ke liye font apne aap Nirmala UI ho jata hai.</p>
       <div class="sech">Fix captions</div>
       <p class="mute" style="font-size:12px;margin:0 0 10px">Video upload hone ke baad Whisper ka transcript yahan aata hai. Galat line theek karo, phir <b>Save &amp; re-run</b>.</p>
       <div id="segEditor"><p class="dim" style="font-size:12px">Pehle video analyze hone do (Edit video ya Analyze only).</p></div>
@@ -236,8 +259,15 @@ function toast(msg, kind = "") {
 $("themeBtn").onclick = () => { const d = document.documentElement; d.dataset.theme = d.dataset.theme === "dark" ? "light" : "dark"; try { localStorage.setItem("theme", d.dataset.theme); } catch (e) {} };
 try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
 $("menuBtn").onclick = () => $("side").classList.toggle("show");
-api("/health").then(() => { $("healthDot").className = "dot ok"; $("healthTxt").textContent = "backend online"; })
-  .catch(() => { $("healthDot").className = "dot bad"; $("healthTxt").textContent = "backend offline"; });
+async function checkHealth() {
+  try {
+    const h = await api("/health"); S.health = h; const bad = !h.ffmpeg_ok;
+    $("healthDot").className = "dot " + (bad ? "bad" : "ok"); $("healthTxt").textContent = bad ? "backend online · FFmpeg missing" : "backend online";
+    $("ffBanner").classList.toggle("hidden", !bad); if (bad) $("ffMsg").textContent = "⚠ " + ((h.ffmpeg && h.ffmpeg.message) || "FFmpeg nahi mila.");
+  } catch (e) { $("healthDot").className = "dot bad"; $("healthTxt").textContent = "backend offline"; }
+}
+$("ffRecheck").onclick = async () => { await checkHealth(); toast(S.health && S.health.ffmpeg_ok ? "FFmpeg mil gaya ✓" : "Abhi bhi FFmpeg nahi mila", S.health && S.health.ffmpeg_ok ? "ok" : "warn"); };
+checkHealth();
 
 /* ---------------- tabs + views ---------------- */
 function showTab(n) { S.tab = n; document.querySelectorAll("#tabs .tab").forEach(b => b.classList.toggle("on", b.dataset.tab === n)); document.querySelectorAll(".pane").forEach(p => p.classList.toggle("on", p.id === "pane-" + n)); }
@@ -273,7 +303,8 @@ function setFile(f) {
 }
 function newProject(keepFile) {
   clearTimeout(S.timer);
-  Object.assign(S, { jobId:null, job:null, analysis:null, edl:null, hasOutput:false, outKey:"", file: keepFile ? S.file : null });
+  Object.assign(S, { jobId:null, job:null, analysis:null, edl:null, hasOutput:false, outKey:"", file: keepFile ? S.file : null, refFile:null, ref:null, cap:{ preset:"auto", size:"auto" } });
+  if (window.syncCap) { syncCap(); renderRef(null); $("chatCard").classList.add("hidden"); $("refFile").value = ""; }
   document.querySelectorAll(".card").forEach(c => c.classList.add("hidden"));
   $("dl").classList.add("hidden"); $("analyzeOnly").classList.toggle("hidden", !keepFile);
   $("views").querySelector('[data-v="edit"]').disabled = true; $("views").querySelector('[data-v="both"]').disabled = true;
@@ -289,13 +320,18 @@ $("newBtn").onclick = () => { newProject(false); $("prompt").value = ""; syncQui
 
 /* ---------------- prompt helpers ---------------- */
 const QUICK = [["Captions","Add animated captions at the bottom."],["Remove noise","Remove the background noise."],["Music","Add calm background music."],["Zoom cuts","Add punch-in zoom cuts."],
-  ["Sound FX","Add whoosh and pop sound effects."],["Remove pauses","Remove long pauses, stutters and mistakes."],["Vertical 9:16","Make it a vertical 9:16 video."]];
+  ["Sound FX","Add whoosh and pop sound effects."],["Remove pauses","Remove long pauses, stutters and mistakes."],["Vertical 9:16","Make it a vertical 9:16 video."],
+  ["Follow my face","Follow my face when cropping."],["Blurred background","Use a blurred background instead of black bars."]];
+const PLATFORM_UI = [["Instagram Reel","Make it an Instagram Reel.","9:16 · 1080x1920 · ~15-45s · Hormozi captions"],["YouTube Short","Make it a YouTube Short.","9:16 · 1080x1920 · Hormozi captions"],
+  ["TikTok","Make it a TikTok video.","9:16 · 1080x1920 · Hormozi captions"],["LinkedIn","Make it a LinkedIn post.","1:1 · 1080x1080 · boxed captions"],["YouTube","Make it a YouTube video.","16:9 · 1920x1080"]];
 const EXAMPLES = ["Make a 30 second Instagram reel with captions", "Create a 60 second YouTube video, remove silence and fillers", "Square 1:1 clip, fast and energetic, with background music",
   "Vertical short under 45 seconds focusing on pricing, with zoom", "30 second reel, remove background noise, add music, title: \"Pricing Secrets\""];
-function syncQuick() { document.querySelectorAll("#quick .chip").forEach(c => c.classList.toggle("on", $("prompt").value.includes(c.dataset.t))); refreshButtons(); }
+function syncQuick() { document.querySelectorAll("#quick .chip, #platforms .chip").forEach(c => c.classList.toggle("on", $("prompt").value.includes(c.dataset.t))); refreshButtons(); }
 QUICK.forEach(([l, t]) => { const c = document.createElement("button"); c.className = "chip"; c.textContent = "+ " + l; c.dataset.t = t;
   c.onclick = () => { const v = $("prompt").value; $("prompt").value = v.includes(t) ? v.replace(t, "").replace(/\s{2,}/g, " ").trim() : (v.trim() + " " + t).trim(); syncQuick(); }; $("quick").appendChild(c); });
 EXAMPLES.forEach(t => { const c = document.createElement("button"); c.className = "chip"; c.textContent = t; c.onclick = () => { $("prompt").value = t; syncQuick(); }; $("examples").appendChild(c); });
+PLATFORM_UI.forEach(([l, t, tip]) => { const c = document.createElement("button"); c.className = "chip"; c.textContent = l; c.dataset.t = t; c.title = tip;
+  c.onclick = () => { let v = $("prompt").value; const on = v.includes(t); PLATFORM_UI.forEach(p => { v = v.replace(p[1], ""); }); v = v.replace(/\s{2,}/g, " ").trim(); $("prompt").value = on ? v : (v + " " + t).trim(); syncQuick(); }; $("platforms").appendChild(c); });
 $("prompt").addEventListener("input", syncQuick);
 
 /* ---------------- Look & Effects (same fields as backend models.edl.Look) ---------------- */
@@ -352,14 +388,18 @@ async function run(analyzeOnly) {
     if (!S.jobId) {
       if (!S.file) return toast("Pehle video choose karo.", "warn");
       if (!analyzeOnly && !p) { showTab("prompt"); return toast("Instruction likho ya Look & Effects chuno.", "warn"); }
-      const fd = new FormData(); fd.append("file", S.file); if (!analyzeOnly) fd.append("instruction", p);
+      const fd = new FormData(); fd.append("file", S.file); const needRef = !!S.refFile && !analyzeOnly; if (!analyzeOnly && !needRef) fd.append("instruction", p);
       if ($("music").files[0]) fd.append("music", $("music").files[0]); if (lookOn) fd.append("look", JSON.stringify(S.look));
+      if (S.cap.preset !== "auto" || S.cap.size !== "auto") fd.append("caption_style", JSON.stringify(S.cap));
       $("go").disabled = true; $("go").textContent = "⏳ Uploading…";
-      const j = await api("/jobs", { method: "POST", body: fd }); S.jobId = j.id; S.job = j;
+      let j = await api("/jobs", { method: "POST", body: fd }); S.jobId = j.id; S.job = j;
+      if (S.refFile) { await uploadReference(S.refFile); }                                  // reference must exist BEFORE the first plan
+      if (needRef) { await waitIdle(); j = await api(`/jobs/${S.jobId}/edit`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instruction: p }) }); S.job = j; }
       $("analyzeOnly").classList.add("hidden"); toast(analyzeOnly ? "Analyze shuru ho gaya." : "Agent shuru ho gaya.", "ok");
     } else {
       if (!analyzeOnly && !p) { showTab("prompt"); return toast("Instruction likho ya Look & Effects chuno.", "warn"); }
       await api(`/jobs/${S.jobId}/look`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(S.look) });
+      await api(`/jobs/${S.jobId}/caption-style`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(S.cap) });
       if ($("music").files[0]) { const m = new FormData(); m.append("file", $("music").files[0]); await api(`/jobs/${S.jobId}/music`, { method: "POST", body: m }); }
       S.job = await api(`/jobs/${S.jobId}/edit`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instruction: p }) });
       S.hasOutput = false; toast("Re-run shuru.", "ok");
@@ -373,7 +413,7 @@ function poll() {
   clearTimeout(S.timer);
   if (!S.jobId) return;
   api(`/jobs/${S.jobId}`).then(async j => {
-    S.job = j; renderJob();
+    S.job = j; renderJob(); renderChat();
     if (j.stages && j.stages.observe && j.stages.observe.status === "done" && !S.analysis) loadAnalysis();
     if (j.busy) { S.timer = setTimeout(poll, 1200); return; }
     await loadAnalysis(); if (j.status === "done") await loadResult();
@@ -402,7 +442,7 @@ async function loadAnalysis() {
   $("anChips").innerHTML = [["Duration", (m.duration || 0).toFixed(1) + "s"], ["Size", `${m.width}×${m.height}`], ["FPS", (m.fps || 0).toFixed(0)], ["Audio", m.has_audio ? (m.audio_codec || "yes") : "none"],
     ["Scenes", a.scene_count], ["Silences", `${a.silence_count} (${a.silence_seconds}s)`], ["Segments", a.segments], ["Fillers", a.filler_count], ["Language", a.language || "—"]].map(([k, v]) => `<span class="chip">${k} <b>${esc(v)}</b></span>`).join("");
   $("anNote").textContent = a.transcript_note ? "⚠ " + a.transcript_note : (a.transcript_snippet ? "“" + a.transcript_snippet.slice(0, 220) + (a.transcript_snippet.length > 220 ? "…" : "") + "”" : "");
-  renderSegEditor(a.transcript_segments || []);
+  renderSegEditor(a.transcript_segments || []); loadTakes();
   const hasCaps = (a.captions || []).length > 0; $("ccBtn").classList.toggle("hidden", !hasCaps);
   if (hasCaps) { setTrack($("vOrig"), `/api/jobs/${S.jobId}/captions?kind=source&format=vtt&n=${a.captions.length}`); $("srcDl").innerHTML = `<a class="gbtn" href="/api/jobs/${S.jobId}/captions/download?kind=source&format=srt">⬇ Source .srt</a><a class="gbtn" href="/api/jobs/${S.jobId}/captions/download?kind=source&format=vtt">⬇ .vtt</a>`; }
   $("saveSegs").disabled = $("retrans").disabled = !(a.transcript_segments || []).length && false;
@@ -456,7 +496,7 @@ $("vEdit").addEventListener("loadedmetadata", () => { $("playhead").style.left =
 /* ---------------- decisions / report ---------------- */
 function renderDecisions(j) {
   $("repCard").classList.remove("hidden");
-  const ic = l => /look|filter/i.test(l) ? "🎨" : /noise|denois/i.test(l) ? "🔇" : /music/i.test(l) ? "🎵" : /caption/i.test(l) ? "💬" : /zoom/i.test(l) ? "🔎" : /sound effect|sfx/i.test(l) ? "🔔" : /brain|cut|removed|pause|stutter/i.test(l) ? "✂️" : /kept every frame/i.test(l) ? "🛡" : /clip|length/i.test(l) ? "🎞" : "•";
+  const ic = l => /face-aware|framing|reframe/i.test(l) ? "🎯" : /re-take|best take|take \d/i.test(l) ? "🎬" : /look|filter|^style:/i.test(l) ? "🎨" : /noise|denois/i.test(l) ? "🔇" : /music/i.test(l) ? "🎵" : /caption/i.test(l) ? "💬" : /zoom/i.test(l) ? "🔎" : /sound effect|sfx/i.test(l) ? "🔔" : /brain|cut|removed|pause|stutter/i.test(l) ? "✂️" : /kept every frame/i.test(l) ? "🛡" : /clip|length/i.test(l) ? "🎞" : "•";
   const out = []; (j.explanation || []).forEach(l => { if (/^\s{2,}/.test(l)) out.push(`<li class="sub">${esc(l.trim())}</li>`); else out.push(`<li><span class="ic">${ic(l)}</span><span>${esc(l)}</span></li>`); });
   $("decisions").innerHTML = out.join("") || `<li class="mute">Koi explanation nahi mili.</li>`;
 }
@@ -497,6 +537,8 @@ async function openJob(id) {
   try {
     const j = await api(`/jobs/${id}`); S.job = j; $("prompt").value = j.instruction && j.instruction !== LOOK_ONLY ? j.instruction : ""; syncQuick();
     try { S.look = { ...DEFAULT_LOOK, ...(await api(`/jobs/${id}/look`)) }; } catch (e) { S.look = { ...DEFAULT_LOOK }; } syncLook();
+    try { S.cap = { preset: "auto", size: "auto", ...(await api(`/jobs/${id}/caption-style`)) }; } catch (e) { S.cap = { preset: "auto", size: "auto" }; } syncCap();
+    try { const r = await api(`/jobs/${id}/reference`); S.ref = r.profile ? r : null; renderRef(S.ref); } catch (e) { renderRef(null); }
     $("hero").classList.add("hidden"); $("stage").classList.remove("hidden"); $("vOrig").dataset.key = ""; ensureSource();
     $("fileChip").classList.remove("hidden"); $("fileChip").innerHTML = `📁 <b>${esc(j.filename || id)}</b>`;
     renderJob(); poll();
@@ -529,6 +571,71 @@ async function fileAudioCheck() {
   v.addEventListener("playing", () => { since = performance.now(); peak = 0; try { setup(); if (ctx && ctx.state === "suspended") ctx.resume(); } catch (e) { txt.textContent = "Meter error: " + e.message; } if (!raf) raf = requestAnimationFrame(tick); });
   v.addEventListener("pause", () => { bar.style.width = "0"; });
 })($("vEdit"), $("meterBar"), $("meterTxt"));
+
+/* ---------------- caption look (UI choice wins over the prompt) ---------------- */
+const CAP_PRESETS = [["auto", "Auto"], ["classic", "Classic"], ["hormozi", "Hormozi"], ["minimal", "Minimal"], ["boxed", "Boxed"], ["karaoke", "Karaoke"]];
+const CAP_SIZES = [["auto", "Auto"], ["small", "Small"], ["normal", "Normal"], ["large", "Large"]];
+S.cap = { preset: "auto", size: "auto" };
+CAP_PRESETS.forEach(([k, l]) => { const c = document.createElement("button"); c.className = "chip"; c.dataset.k = k; c.textContent = l; c.onclick = () => { S.cap.preset = k; syncCap(); }; $("capPresets").appendChild(c); });
+CAP_SIZES.forEach(([k, l]) => { const c = document.createElement("button"); c.className = "chip"; c.dataset.k = k; c.textContent = l; c.onclick = () => { S.cap.size = k; syncCap(); }; $("capSizes").appendChild(c); });
+function syncCap() { document.querySelectorAll("#capPresets .chip").forEach(c => c.classList.toggle("on", c.dataset.k === S.cap.preset)); document.querySelectorAll("#capSizes .chip").forEach(c => c.classList.toggle("on", c.dataset.k === S.cap.size)); }
+syncCap();
+
+/* ---------------- chat revise ---------------- */
+["zoom kam karo", "caption chhote karo", "aur chhota karo", "music hata do", "hormozi captions laga do", "face follow karo", "black and white kar do"].forEach(t => {
+  const c = document.createElement("button"); c.className = "chip"; c.textContent = t; c.onclick = () => sendChat(t); $("chatSuggest").appendChild(c); });
+function renderChat() {
+  const j = S.job, show = !!(S.jobId && j && j.status !== "uploaded" && (j.stages && j.stages.observe && j.stages.observe.status === "done"));
+  $("chatCard").classList.toggle("hidden", !show); if (!show) return;
+  const busy = !!j.busy; $("chatIn").disabled = $("chatSend").disabled = busy;
+  $("chatLog").innerHTML = (j.chat || []).map(m => `<div class="msg ${m.role}">${esc(m.text)}</div>`).join("") || `<p class="dim" style="font-size:12px;margin:0">Result ke baad yahan bolo — jaise “zoom kam karo”.</p>`;
+  $("chatLog").scrollTop = 1e9;
+}
+async function sendChat(text) {
+  text = (text !== undefined ? text : $("chatIn").value).trim(); if (!text || !S.jobId || (S.job && S.job.busy)) return;
+  try {
+    $("chatIn").value = ""; $("chatSend").disabled = true;
+    const r = await api(`/jobs/${S.jobId}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) });
+    S.job = r.job; S.hasOutput = false; $("prompt").value = r.instruction; syncQuick(); toast(r.reply, r.understood ? "ok" : "warn"); renderChat(); poll();
+  } catch (e) { toast(e.message, "bad"); renderChat(); }
+}
+$("chatSend").onclick = () => sendChat(); $("chatIn").addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
+
+/* ---------------- reference video ---------------- */
+S.refFile = null; S.ref = null;
+async function waitIdle() { for (let i = 0; i < 600; i++) { const j = await api(`/jobs/${S.jobId}`); if (!j.busy) return j; await new Promise(r => setTimeout(r, 1000)); } }
+async function uploadReference(f) {
+  const fd = new FormData(); fd.append("file", f);
+  try { toast("Reference analyze ho raha hai…"); const r = await api(`/jobs/${S.jobId}/reference`, { method: "POST", body: fd }); S.ref = r; S.refFile = null; renderRef(r); toast("Reference ready ✓", "ok"); }
+  catch (e) { toast(e.message, "bad"); S.refFile = null; renderRef(null); }
+}
+$("refFile").addEventListener("change", e => { const f = e.target.files[0]; if (!f) return; if (S.jobId) uploadReference(f); else { S.refFile = f; renderRef({ pending: f.name }); } });
+function renderRef(r) {
+  const box = $("refBox"); if (!r) { box.classList.add("hidden"); box.innerHTML = ""; return; }
+  box.classList.remove("hidden");
+  if (r.pending) { box.innerHTML = `<div class="chip">📎 <b>${esc(r.pending)}</b> — Edit dabate hi analyze hoga</div> <button class="gbtn" id="refDel" style="padding:3px 10px;font-size:12px">Remove</button>`; $("refDel").onclick = clearRef; return; }
+  const o = { aspect: true, pace: true, look: true, length: false, ...(r.options || {}) }, on = r.enabled !== false;
+  box.innerHTML = `<div class="chips">${(r.summary || []).map(s => `<span class="chip">${esc(s)}</span>`).join("")}</div>
+    <div class="optrow"><label><input type="checkbox" id="ro_enabled" ${on ? "checked" : ""}> use reference</label>
+    ${[["aspect", "format"], ["pace", "pace / cuts"], ["look", "colour look"], ["length", "same length"]].map(([k, l]) => `<label><input type="checkbox" data-ro="${k}" ${o[k] ? "checked" : ""}> ${l}</label>`).join("")}
+    <button class="gbtn" id="refDel" style="padding:3px 10px;font-size:12px">Remove</button></div>
+    <p class="dim" style="font-size:11px;margin:8px 0 0">Ye detect nahi hota: caption style, music vs speech, transitions. Agle run mein lagega.</p>`;
+  const save = async () => { const body = { enabled: $("ro_enabled").checked }; document.querySelectorAll("[data-ro]").forEach(c => body[c.dataset.ro] = c.checked);
+    try { S.ref = await api(`/jobs/${S.jobId}/reference/options`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); S.ref.summary = r.summary; } catch (e) { toast(e.message, "bad"); } };
+  $("ro_enabled").onchange = save; document.querySelectorAll("[data-ro]").forEach(c => c.onchange = save); $("refDel").onclick = clearRef;
+}
+async function clearRef() { S.refFile = null; S.ref = null; $("refFile").value = ""; if (S.jobId) { try { await api(`/jobs/${S.jobId}/reference`, { method: "DELETE" }); } catch (e) {} } renderRef(null); }
+
+/* ---------------- repeated takes (best-take selection) ---------------- */
+async function loadTakes() {
+  const box = $("takesBox"); box.classList.add("hidden"); box.innerHTML = "";
+  try {
+    const t = await api(`/jobs/${S.jobId}/takes`); if (!t.groups || !t.groups.length) return;
+    box.classList.remove("hidden");
+    box.innerHTML = `<div class="sech">🎬 Repeated takes found — agent keeps the best one</div>` + t.groups.map(g => `<div class="takeline">“${esc(g.line)}”<br>${g.takes.map((x, i) =>
+      `<span class="chip" title="fillers ${x.fillers} · stutters ${x.stutters} · hesitations ${x.pauses} · ${x.rate} words/s">${x.kept ? "✅ kept" : "✂ cut"} take ${i + 1} · ${(x.score * 100).toFixed(0)}%</span>`).join("")}</div>`).join("");
+  } catch (e) {}
+}
 
 syncLook(); syncQuick(); listProjects(); refreshButtons();
 </script>

@@ -4,6 +4,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 # Suppress benign ConnectionResetError on Windows when browser seeks / drops video stream chunks
@@ -29,13 +30,17 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from . import config
-from .agents import loop, planner
+from .agents import loop, planner, presets, revise
+from .analysis import reference as reference_mod
+from .analysis import takes as takes_mod
 from .analysis.pipeline import load_analysis
+from .editing import reframe as reframe_mod
 from .editing.captions import transcript_to_captions, write_srt, write_vtt
 from .models.edl import EDL, Look
 from .models.transcript import Segment, Transcript, Word
 from .services.jobs import JobStore
-from .utils.ffmpeg import FFmpegError, ffprobe_json, run as ff_run
+from .utils.errors import friendly
+from .utils.ffmpeg import FFmpegError, ffmpeg_status, ffprobe_json, run as ff_run
 
 app = FastAPI(title="AI Video Editing Agent", version="1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -108,25 +113,73 @@ def _analyze_only(job_id: str) -> None:
         loop.ensure_observed(store, job_id)
         store.update(job_id, status="analyzed", busy=False)
     except Exception as e:
-        store.update(job_id, status="failed", busy=False, error=str(e))
+        store.update(job_id, status="failed", busy=False, error=friendly(e), error_raw=str(e))
         store.log(job_id, f"FAILED analysis: {e}")
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    """The UI shows a banner when FFmpeg is missing (the usual cause of 'WinError 2')."""
+    st = ffmpeg_status()
+    return {"ok": True, "ffmpeg_ok": st["ok"], "ffmpeg": st, "face_tracking": reframe_mod.available(),
+            "llm": config.LLM_PROVIDER, "max_upload_mb": config.MAX_UPLOAD_MB, "running_jobs": len(_running)}
+
+
+@app.get("/api/presets")
+def get_presets():
+    return {"platforms": presets.list_presets(),
+            "caption_presets": ["classic", "hormozi", "minimal", "boxed", "karaoke"],
+            "caption_sizes": ["small", "normal", "large"]}
+
+
+def _save_upload(up: UploadFile, dest: Path, max_mb: int) -> None:
+    """Stream the upload to disk and stop as soon as it is bigger than the limit."""
+    limit, size, too_big = max_mb * 1024 * 1024, 0, False
+    with open(dest, "wb") as f:
+        while True:
+            chunk = up.file.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > limit:
+                too_big = True
+                break
+            f.write(chunk)
+    if too_big:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(413, f"File {max_mb} MB ki limit se badi hai (MAX_UPLOAD_MB={max_mb} badha sakte ho).")
+
+
+def _require_video(path: Path) -> None:
+    """Reject files that have a video extension but are not real, readable videos."""
+    try:
+        info = ffprobe_json(path)
+    except FFmpegError as e:
+        path.unlink(missing_ok=True)
+        raise HTTPException(400, "Ye file valid video nahi lagti (ffprobe padh nahi paya).") from e
+    if not any(s.get("codec_type") == "video" for s in info.get("streams", [])):
+        path.unlink(missing_ok=True)
+        raise HTTPException(400, "Is file me video stream nahi mili — koi valid video upload karo.")
 
 
 @app.post("/api/jobs")
 async def create_job(file: UploadFile = File(...), instruction: Optional[str] = Form(None),
-                     music: Optional[UploadFile] = File(None), look: Optional[str] = Form(None)):
+                     music: Optional[UploadFile] = File(None), look: Optional[str] = Form(None),
+                     caption_style: Optional[str] = Form(None)):
     ext = Path(file.filename or "").suffix.lower()
     if ext not in config.ALLOWED_EXT:
         raise HTTPException(400, f"Unsupported file type '{ext}'. Allowed: {sorted(config.ALLOWED_EXT)}")
+    st = ffmpeg_status()
+    if not st["ok"]:                                       # fail fast with a clear message instead of a failed job later
+        raise HTTPException(503, st["message"])
     job_id = store.create(file.filename or f"video{ext}")
     dest = store.path(job_id) / "source" / f"input{ext}"
-    with open(dest, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    try:
+        _save_upload(file, dest, config.MAX_UPLOAD_MB)
+        _require_video(dest)
+    except HTTPException:
+        shutil.rmtree(store.path(job_id), ignore_errors=True)
+        raise
     if music is not None and music.filename:
         _save_music(job_id, music)
     if look:
@@ -134,6 +187,14 @@ async def create_job(file: UploadFile = File(...), instruction: Optional[str] = 
             _save_look(job_id, Look(**json.loads(look)))
         except Exception:
             raise HTTPException(400, "look must be valid JSON with the Look fields")
+    if caption_style:
+        try:
+            cs = json.loads(caption_style)
+            put_caption_style(job_id, CaptionStyleIn(preset=cs.get("preset"), size=cs.get("size")))
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(400, "caption_style must be JSON like {\"preset\":\"hormozi\",\"size\":\"large\"}")
     if instruction and instruction.strip():
         _submit(job_id, loop.run_agent, store, job_id, instruction.strip())
     else:
@@ -254,6 +315,154 @@ def delete_music(job_id: str):
     for old in (store.path(job_id) / "assets").glob("music.*"):
         old.unlink()
     return {"music": None}
+
+
+class ChatIn(BaseModel):
+    message: str
+
+
+@app.post("/api/jobs/{job_id}/chat")
+def chat(job_id: str, body: ChatIn):
+    """Chat-style revise: "zoom kam karo", "caption chhote", "20 second me" -> merged into the last instruction, re-run."""
+    job = _job(job_id)
+    msg = body.message.strip()
+    if not msg:
+        raise HTTPException(400, "message is empty")
+    if job_id in _running:
+        raise HTTPException(409, "job already running")
+    cur = None
+    edl_p = store.path(job_id) / "edl.json"
+    if edl_p.exists():
+        try:
+            cur = float(json.loads(edl_p.read_text(encoding="utf-8"))["project"]["duration"])
+        except Exception:
+            cur = None
+    rev = revise.interpret(msg, job.get("instruction") or "", cur)
+    stamp = time.strftime("%H:%M:%S")
+    store.update(job_id, chat=(job.get("chat") or []) + [
+        {"role": "user", "text": msg, "ts": stamp},
+        {"role": "agent", "text": rev.reply, "changes": rev.changes, "ts": stamp}])
+    _submit(job_id, loop.run_agent, store, job_id, rev.instruction)
+    return {"reply": rev.reply, "changes": rev.changes, "instruction": rev.instruction, "understood": rev.understood,
+            "job": store.load(job_id)}
+
+
+class CaptionStyleIn(BaseModel):
+    preset: Optional[str] = None        # classic | hormozi | minimal | boxed | karaoke | auto/None = let the prompt decide
+    size: Optional[str] = None          # small | normal | large | auto/None
+
+
+@app.put("/api/jobs/{job_id}/caption-style")
+def put_caption_style(job_id: str, body: CaptionStyleIn):
+    """Caption look chosen in the UI (wins over words in the prompt on the next run)."""
+    _job(job_id)
+    out = {}
+    if body.preset and body.preset != "auto":
+        if body.preset not in ("classic", "hormozi", "minimal", "boxed", "karaoke"):
+            raise HTTPException(400, "unknown caption preset")
+        out["preset"] = body.preset
+    if body.size and body.size != "auto":
+        if body.size not in ("small", "normal", "large"):
+            raise HTTPException(400, "size must be small|normal|large")
+        out["size"] = body.size
+    assets = store.path(job_id) / "assets"
+    assets.mkdir(exist_ok=True)
+    f = assets / "caption_style.json"
+    if out:
+        f.write_text(json.dumps(out), encoding="utf-8")
+    else:
+        f.unlink(missing_ok=True)
+    return out
+
+
+@app.get("/api/jobs/{job_id}/caption-style")
+def get_caption_style(job_id: str):
+    _job(job_id)
+    f = store.path(job_id) / "assets" / "caption_style.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+
+def _ref_file(job_id: str) -> Path:
+    return store.path(job_id) / "assets" / "reference.json"
+
+
+@app.post("/api/jobs/{job_id}/reference")
+def upload_reference(job_id: str, file: UploadFile = File(...)):
+    """Reference video: its pace / format / look is measured and applied to the next run."""
+    _job(job_id)
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in config.ALLOWED_EXT:
+        raise HTTPException(400, f"Unsupported file type '{ext}'. Allowed: {sorted(config.ALLOWED_EXT)}")
+    assets = store.path(job_id) / "assets"
+    assets.mkdir(exist_ok=True)
+    for old in assets.glob("reference.*"):
+        old.unlink()
+    dest = assets / f"reference{ext}"
+    _save_upload(file, dest, config.MAX_REFERENCE_MB)
+    try:
+        _require_video(dest)
+        profile = reference_mod.analyze(dest)
+    except HTTPException:
+        raise
+    except Exception as e:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, f"Reference analyze nahi ho paya: {friendly(e)}")
+    data = {"filename": file.filename, "profile": profile, "options": dict(reference_mod.DEFAULT_OPTS), "enabled": True}
+    _ref_file(job_id).write_text(json.dumps(data, indent=2), encoding="utf-8")
+    store.log(job_id, "Reference video analysed: " + " | ".join(reference_mod.describe(profile)))
+    return {**data, "summary": reference_mod.describe(profile)}
+
+
+@app.get("/api/jobs/{job_id}/reference")
+def get_reference(job_id: str):
+    _job(job_id)
+    f = _ref_file(job_id)
+    if not f.exists():
+        return {"profile": None}
+    data = json.loads(f.read_text(encoding="utf-8"))
+    return {**data, "summary": reference_mod.describe(data["profile"])}
+
+
+class RefOptsIn(BaseModel):
+    aspect: bool = True
+    pace: bool = True
+    look: bool = True
+    length: bool = False
+    enabled: bool = True
+
+
+@app.put("/api/jobs/{job_id}/reference/options")
+def put_reference_options(job_id: str, body: RefOptsIn):
+    _job(job_id)
+    f = _ref_file(job_id)
+    if not f.exists():
+        raise HTTPException(404, "no reference uploaded")
+    data = json.loads(f.read_text(encoding="utf-8"))
+    data["options"] = {"aspect": body.aspect, "pace": body.pace, "look": body.look, "length": body.length}
+    data["enabled"] = body.enabled
+    f.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return data
+
+
+@app.delete("/api/jobs/{job_id}/reference")
+def delete_reference(job_id: str):
+    _job(job_id)
+    _ref_file(job_id).unlink(missing_ok=True)
+    for old in (store.path(job_id) / "assets").glob("reference.*"):
+        old.unlink()
+    return {"profile": None}
+
+
+@app.get("/api/jobs/{job_id}/takes")
+def get_takes(job_id: str):
+    """Groups of repeated takes and which one the agent keeps (and why)."""
+    _job(job_id)
+    if not (store.path(job_id) / "analysis" / "transcript.json").exists():
+        raise HTTPException(404, "transcript not ready")
+    an = load_analysis(store.path(job_id))
+    units, groups = takes_mod.analyze(an.transcript, store.source_file(job_id) if an.metadata.has_audio else None,
+                                      store.path(job_id) / "analysis" / "take_energy.json")
+    return {"groups": takes_mod.describe(units, groups)}
 
 
 @app.get("/api/jobs/{job_id}/audio-check")

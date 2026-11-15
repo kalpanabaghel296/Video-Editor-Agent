@@ -30,3 +30,9 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
 
 ALLOWED_EXT = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
+
+# Tools / limits (week 7)
+FFMPEG_PATH = os.getenv("FFMPEG_PATH", "")                  # folder that holds ffmpeg + ffprobe (or the full path of ffmpeg). Optional: PATH is searched first.
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))      # upload size limit for the video
+MAX_REFERENCE_MB = int(os.getenv("MAX_REFERENCE_MB", "200"))  # ... and for a reference video
+REFERENCE_MAX_SECONDS = int(os.getenv("REFERENCE_MAX_SECONDS", "180"))   # only the first N seconds of a reference are analysed

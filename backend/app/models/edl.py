@@ -71,7 +71,7 @@ class ProjectSettings(BaseModel):
     width: int = 0
     height: int = 0
     fps: float = 30.0
-    fit: Literal["crop", "pad"] = "crop"
+    fit: Literal["crop", "pad", "blur"] = "crop"       # crop = fill the frame, pad = black bars, blur = blurred copy behind
     color_grade: bool = False
     look: Look = Field(default_factory=Look)
 
@@ -108,9 +108,17 @@ class Caption(BaseModel):
     words: List[CaptionWord] = []
 
 
+CaptionPreset = Literal["classic", "hormozi", "minimal", "boxed", "karaoke"]
+
+
 class CaptionSettings(BaseModel):
     enabled: bool = False
     style: Literal["plain", "styled"] = "styled"
+    preset: CaptionPreset = "classic"                  # look of the burned-in captions (editing/captions.py)
+    size: Literal["small", "normal", "large"] = "normal"
+    margin_pct: Optional[float] = None                 # distance from the bottom as a fraction of the height (platform safe zone)
+    max_words: Optional[int] = None                    # words per caption block (None = preset default)
+    font: Optional[str] = None                         # override; default is picked per preset / script (Devanagari -> Nirmala UI)
 
 
 class Effect(BaseModel):
@@ -124,6 +132,15 @@ class Transition(BaseModel):
     type: Literal["cut", "fade"] = "fade"
     clip_id: str
     duration: float = 0.3
+
+
+class Reframe(BaseModel):
+    """Smart-crop path of one clip (face-aware reframing): where the crop window sits over time.
+    points = [[seconds from the start of the clip, centre of the window as a 0..1 fraction of the frame]]."""
+    clip_id: str
+    axis: Literal["x", "y"] = "x"                      # x: the video is wider than the target (landscape -> 9:16)
+    points: List[List[float]] = []
+    face_ratio: float = 0.0                            # share of sampled frames in which a face was found
 
 
 class Overlay(BaseModel):
@@ -146,6 +163,7 @@ class EDL(BaseModel):
     effects: List[Effect] = []
     transitions: List[Transition] = []
     overlays: List[Overlay] = []
+    reframes: List[Reframe] = []
     explanation: List[str] = []
     requirements: Optional[Dict[str, Any]] = None
 

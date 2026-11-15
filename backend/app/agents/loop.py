@@ -11,6 +11,7 @@ from ..analysis.pipeline import load_analysis, run_observe
 from ..config import MAX_RETRIES
 from ..editing.renderer import RenderError, render
 from ..services.jobs import JobStore
+from ..utils.errors import friendly
 from . import director, inspector, planner, validator
 
 
@@ -104,5 +105,5 @@ def run_agent(store: JobStore, job_id: str, instruction: str) -> None:
         store.set_stage(job_id, "export", "done")
     except Exception as e:                                   # never crash the worker thread
         store.log(job_id, traceback.format_exc())
-        store.update(job_id, status="failed", busy=False, error=str(e))
+        store.update(job_id, status="failed", busy=False, error=friendly(e), error_raw=str(e))
         store.log(job_id, f"FAILED: {e}")
