@@ -1,6 +1,7 @@
 """Job manager: per-job folder + job.json state + log. Tracks every agent stage."""
 import json
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -78,6 +79,28 @@ class JobStore:
                     s["stages"][k] = {"status": "pending", "message": ""}
             s.update(error=None, warnings=[], explanation=[], attempts=0, outputs={})
             self._save(job_id, s)
+
+    def reset_all(self, job_id: str, message: str = "") -> None:
+        """The source video changed (clips added / removed / reordered): old analysis, plan and output are stale."""
+        jd = self.path(job_id)
+        for sub in ("analysis", "output", "work"):
+            shutil.rmtree(jd / sub, ignore_errors=True)
+            (jd / sub).mkdir(parents=True, exist_ok=True)
+        (jd / "edl.json").unlink(missing_ok=True)
+        with self._locks[job_id]:
+            s = self.load(job_id)
+            s["stages"] = {k: {"status": "pending", "message": ""} for k in STAGES}
+            s.update(status="uploaded", stage=None, error=None, warnings=[], explanation=[], attempts=0, outputs={},
+                     requirements=None)
+            self._save(job_id, s)
+        if message:
+            self.log(job_id, message)
+
+    def delete(self, job_id: str) -> None:
+        """Remove the whole project folder (source, clips, analysis, outputs, log)."""
+        with self._locks[job_id]:
+            shutil.rmtree(self.path(job_id), ignore_errors=True)
+        self._locks.pop(job_id, None)
 
     # ---- logging -----------------------------------------------------------
     def log(self, job_id: str, msg: str) -> None:

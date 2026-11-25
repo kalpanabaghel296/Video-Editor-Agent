@@ -12,7 +12,8 @@ from ..config import MAX_RETRIES
 from ..editing.renderer import RenderError, render
 from ..services.jobs import JobStore
 from ..utils.errors import friendly
-from . import director, inspector, planner, validator
+from ..models.edl import EDL
+from . import captions_edit, director, inspector, planner, validator
 
 
 def _write_edl(jd, edl):
@@ -50,6 +51,9 @@ def run_agent(store: JobStore, job_id: str, instruction: str) -> None:
             for a in applied:
                 store.log(job_id, f"  patch: {a}")
             edl.explanation += [f"Auto-fixed: {a}" for a in applied]
+        msg = captions_edit.apply_override(edl, jd)           # manual caption edits survive a re-run (while the clips are the same)
+        if msg:
+            edl.warnings.append(msg)
         _write_edl(jd, edl)
         store.set_stage(job_id, "plan", "done", f"{len(edl.clips)} clips, {edl.project.duration:.1f}s")
 
@@ -79,6 +83,7 @@ def run_agent(store: JobStore, job_id: str, instruction: str) -> None:
             codes = {p.code for p in errs}
             if "OVER_TARGET" in codes:
                 edl, applied = validator.patch(edl, an.metadata, req, an.transcript)
+                captions_edit.apply_override(edl, jd)
                 _write_edl(jd, edl)
             if "ASPECT_MISMATCH" in codes:
                 edl.project.fit = "crop"
@@ -100,10 +105,49 @@ def run_agent(store: JobStore, job_id: str, instruction: str) -> None:
             edl.explanation.append(f"Simplified rendering to level {level} to guarantee a valid output")
         edl.explanation += result.warnings
         _write_edl(jd, edl)
-        store.update(job_id, status="done", busy=False, warnings=result.warnings, explanation=edl.explanation,
+        store.update(job_id, status="done", busy=False, warnings=edl.warnings + result.warnings, explanation=edl.explanation,
                      outputs={"draft": "output/draft.mp4", "final": "output/final.mp4"})
         store.set_stage(job_id, "export", "done")
     except Exception as e:                                   # never crash the worker thread
         store.log(job_id, traceback.format_exc())
         store.update(job_id, status="failed", busy=False, error=friendly(e), error_raw=str(e))
         store.log(job_id, f"FAILED: {e}")
+
+
+
+def rerender_captions(store: JobStore, job_id: str, items=None, regenerate: bool = False) -> None:
+    """Caption-only update: new / edited / deleted caption lines (or a new caption look) are burned into the EXISTING plan.
+    Clips, cuts and length stay exactly as they are and the slow first render pass is skipped when possible."""
+    jd = store.path(job_id)
+    try:
+        store.update(job_id, busy=True, error=None)
+        edl = EDL(**json.loads((jd / "edl.json").read_text(encoding="utf-8")))
+        if regenerate:
+            from ..editing.captions import build_captions
+            an = load_analysis(jd)
+            edl.captions = build_captions(edl.clips, an.transcript, edl.caption_settings)
+            captions_edit.clear(jd)
+        elif items is not None:
+            edl.captions = captions_edit.build(items, edl)
+            captions_edit.save(jd, edl, edl.captions)
+        ui = planner._ui_caption_style(str(store.source_file(job_id)))          # caption look picked in the UI
+        if ui.get("preset"):
+            edl.caption_settings.preset = ui["preset"]
+        if ui.get("size"):
+            edl.caption_settings.size = ui["size"]
+        edl.caption_settings.enabled = bool(edl.captions)
+        store.set_stage(job_id, "act", "running", "captions only")
+        result = render(edl, jd, level=0, captions_only=True)
+        store.set_stage(job_id, "act", "done", "; ".join(result.warnings))
+        store.set_stage(job_id, "export", "running")
+        shutil.copy(result.path, jd / "output" / "final.mp4")
+        edl.explanation = [x for x in edl.explanation if not (x.startswith(("Used your", "Captions updated")) or
+                                                             (x.startswith("Added ") and "caption block" in x))]
+        edl.explanation.append(f"Captions updated: {len(edl.captions)} line(s)")
+        _write_edl(jd, edl)
+        store.update(job_id, status="done", busy=False, warnings=edl.warnings + result.warnings, explanation=edl.explanation,
+                     outputs={"draft": "output/draft.mp4", "final": "output/final.mp4"})
+        store.set_stage(job_id, "export", "done")
+    except Exception as e:
+        store.log(job_id, traceback.format_exc())
+        store.update(job_id, status="failed", busy=False, error=friendly(e), error_raw=str(e))

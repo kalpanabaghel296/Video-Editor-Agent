@@ -97,6 +97,14 @@
   [data-theme=light] .msg.user { background:#e4e9ff; color:#1b2455; }
   #chatLog { max-height:190px; overflow:auto; } .chatbox { display:flex; gap:8px; margin-top:10px; } .chatbox .inp { flex:1; min-width:0; }
   .takeline { margin:6px 0; font-size:12px; color:var(--mute); } .takeline .chip { margin:2px 4px 2px 0; } .optrow { display:flex; gap:12px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:var(--mute); } .optrow label { display:flex; gap:5px; align-items:center; cursor:pointer; }
+  /* week 8: clips tray, delete, caption editor */
+  .clips { display:grid; gap:8px; } .clip { display:grid; grid-template-columns:84px minmax(0,1fr) auto; gap:10px; align-items:center; padding:8px; border:1px solid var(--line); border-radius:10px; background:var(--bg2); }
+  .clip img { width:84px; height:48px; object-fit:cover; border-radius:7px; background:#000; cursor:pointer; display:block; } .clip b { display:block; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .clip small { color:var(--mute); font-size:11px; }
+  .clip .trim { display:flex; gap:6px; align-items:center; margin-top:4px; font-size:11px; color:var(--mute); flex-wrap:wrap; } .clip .trim input { width:62px; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:7px; padding:3px 6px; font:inherit; font-size:12px; }
+  .clip .ctl { display:flex; gap:4px; } .ibtn { width:28px; height:28px; border-radius:8px; border:1px solid var(--line2); display:inline-grid; place-items:center; font-size:13px; flex:none; } .ibtn:hover { border-color:var(--acc); } .ibtn:disabled { opacity:.35; cursor:not-allowed; } .ibtn.del:hover { border-color:var(--bad); color:var(--bad); }
+  .pdel { float:right; margin-left:4px; opacity:.45; padding:0 4px; border-radius:6px; } .pdel:hover { opacity:1; color:var(--bad); }
+  .cap-row { display:grid; grid-template-columns:56px 56px minmax(0,1fr) 28px 28px; gap:5px; margin-bottom:6px; align-items:center; } .cap-row input { background:var(--bg2); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:6px 7px; font:inherit; font-size:12px; min-width:0; } .cap-row input:focus { outline:0; border-color:var(--acc); }
+  #capEditor { max-height:300px; overflow:auto; padding-right:2px; }
 </style>
 </head>
 <body>
@@ -108,6 +116,7 @@
     <div class="spacer"></div>
     <span class="mute" style="font-size:12px"><span class="dot" id="healthDot"></span><span id="healthTxt">connecting…</span></span>
     <button class="tbtn" id="themeBtn" title="Light / dark">🌗</button>
+    <button class="tbtn hidden" id="delBtn" title="Is project ko hamesha ke liye delete karo">🗑 Delete project</button>
     <button class="tbtn" id="newBtn">＋ New project</button>
   </header>
 
@@ -127,9 +136,9 @@
       <button class="gbtn hidden" id="ccBtn" title="Show / hide auto captions on the original">💬 CC</button>
     </div>
 
-    <label class="hero" id="hero"><input id="file" type="file" accept="video/*">
-      <span class="big">🎞</span><h2>Video yahan drop karo</h2>
-      <p>Ya click karke choose karo. Phir right panel mein instruction likho, look chuno, aur <b>Edit video</b> dabao.</p></label>
+    <label class="hero" id="hero"><input id="file" type="file" accept="video/*" multiple>
+      <span class="big">🎞</span><h2>Video(s) yahan drop karo</h2>
+      <p>Ek ya kai clips ek saath. Ya click karke choose karo. Phir right panel mein instruction likho, look chuno, aur <b>Edit video</b> dabao.</p></label>
 
     <div class="stage hidden" id="stage">
       <div class="vbox" id="boxOrig"><span class="lab">Original</span>
@@ -141,6 +150,12 @@
     <div class="hidden" id="soundRow" style="margin-top:8px"><div class="meter"><i id="meterBar"></i></div>
       <div class="mute" style="font-size:12px;margin-top:4px" id="meterTxt">▶ Edited video play karo — live sound level yahan dikhega</div>
       <div class="mute" style="font-size:12px" id="fileAudio"></div></div>
+
+    <div class="card hidden" id="clipsCard">
+      <h4>🎞 Clips <span class="sp"></span><span id="clipsInfo" class="mute" style="text-transform:none;letter-spacing:0;font-weight:400"></span><button class="gbtn" id="addClipsBtn" style="padding:3px 10px;font-size:12px">＋ Add clips</button><input type="file" id="addClips" accept="video/*" multiple class="hidden"></h4>
+      <div class="clips" id="clipList"></div>
+      <p class="dim" style="font-size:11px;margin:8px 0 0">Clips upar se neeche ek ke baad ek judti hain. ↑↓ se order badlo, ✂ se trim karo, 🗑 se hatao. Badlav ke baad video dobara judta hai aur <b>Edit video</b> naye sire se chalana padta hai.</p>
+    </div>
 
     <div class="card hidden" id="progCard">
       <h4>Progress <span class="sp"></span><span id="progMsg" class="mute" style="text-transform:none;letter-spacing:0;font-weight:400"></span></h4>
@@ -225,11 +240,17 @@
       <div class="chips" id="capPresets"></div>
       <div class="sech">Size</div><div class="chips" id="capSizes"></div>
       <p class="mute" style="font-size:12px;margin:8px 0 0">Auto = prompt / platform decide (jaise “hormozi captions” ya Instagram Reel). Yahan kuch chuna to wahi jeetega. Hindi script ke liye font apne aap Nirmala UI ho jata hai.</p>
+      <div class="sech">Edit captions <span style="text-transform:none;letter-spacing:0;font-weight:400">(final video ke captions)</span></div>
+      <p class="mute" style="font-size:12px;margin:0 0 10px">Pehle ek baar <b>Edit video</b> chalao. Phir kisi bhi caption ka text / time badlo, line add ya delete karo aur <b>Apply captions</b> dabao. Sirf captions dobara lagte hain — cuts aur video ki length wahi rehti hai (kuch seconds lagte hain). Upar chuna hua Caption look / Size bhi isi se lagta hai.</p>
+      <div id="capEditor"><p class="dim" style="font-size:12px">Pehle video edit hone do.</p></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 16px"><button class="pbtn" id="capApply" disabled>Apply captions</button><button class="gbtn" id="capAdd" disabled>＋ Add line</button><button class="gbtn" id="capRegen" disabled title="Manual edits hata kar speech se dobara banao">↺ From speech</button></div>
+      <details><summary>Advanced: source transcript (Whisper) theek karo</summary>
       <div class="sech">Fix captions</div>
       <p class="mute" style="font-size:12px;margin:0 0 10px">Video upload hone ke baad Whisper ka transcript yahan aata hai. Galat line theek karo, phir <b>Save &amp; re-run</b>.</p>
       <div id="segEditor"><p class="dim" style="font-size:12px">Pehle video analyze hone do (Edit video ya Analyze only).</p></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button class="pbtn" id="saveSegs" disabled>Save &amp; re-run</button><button class="gbtn" id="retrans" disabled>Re-transcribe</button></div>
       <div class="dl" id="srcDl"></div>
+      </details>
     </div>
     <div class="actions">
       <div class="row"><button class="pbtn" id="go">✨ Edit video</button><button class="gbtn hidden" id="analyzeOnly">Analyze only</button></div>
@@ -288,18 +309,23 @@ document.querySelectorAll("#views button").forEach(b => b.onclick = () => !b.dis
 function bindDrop(el) {
   ["dragenter", "dragover"].forEach(ev => el.addEventListener(ev, e => { e.preventDefault(); el.classList.add("over"); }));
   ["dragleave", "drop"].forEach(ev => el.addEventListener(ev, e => { e.preventDefault(); el.classList.remove("over"); }));
-  el.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) setFile(f); });
+  el.addEventListener("drop", e => { const fs = [...e.dataTransfer.files]; if (fs.length) setFiles(fs); });
 }
 bindDrop($("hero")); bindDrop($("main"));
-$("file").addEventListener("change", e => e.target.files[0] && setFile(e.target.files[0]));
-function setFile(f) {
-  if (!f.type.startsWith("video/") && !/\.(mp4|mov|mkv|avi|webm|m4v)$/i.test(f.name)) return toast("Ye video file nahi lag rahi.", "warn");
-  newProject(true); S.file = f;
-  const v = $("vOrig"); if (v.dataset.url) URL.revokeObjectURL(v.dataset.url);
-  v.dataset.url = URL.createObjectURL(f); v.dataset.key = ""; v.src = v.dataset.url;
-  $("hero").classList.add("hidden"); $("stage").classList.remove("hidden");
-  $("fileChip").classList.remove("hidden"); $("fileChip").innerHTML = `📁 <b>${esc(f.name)}</b> · ${(f.size / 1048576).toFixed(1)} MB`;
-  $("analyzeOnly").classList.remove("hidden"); setView("orig"); refreshButtons(); applyPreview();
+$("file").addEventListener("change", e => { const fs = [...e.target.files]; e.target.value = ""; if (fs.length) setFiles(fs); });
+async function setFiles(files) {
+  files = files.filter(f => f.type.startsWith("video/") || /\.(mp4|mov|mkv|avi|webm|m4v)$/i.test(f.name));
+  if (!files.length) return toast("Ye video file nahi lag rahi.", "warn");
+  if (S.jobId) return addClips(files);                       // a project is open -> the videos become more clips
+  newProject(false);
+  try {
+    toast(files.length > 1 ? `${files.length} clips upload ho rahi hain…` : "Upload ho raha hai…");
+    const fd = new FormData(); files.forEach(f => fd.append("file", f)); fd.append("defer", "true");
+    const j = await api("/jobs", { method: "POST", body: fd }); S.jobId = j.id; S.job = j;
+    $("hero").classList.add("hidden"); $("stage").classList.remove("hidden");
+    $("fileChip").classList.remove("hidden"); $("fileChip").innerHTML = `📁 <b>${esc(files.length > 1 ? files.length + " clips" : files[0].name)}</b>`;
+    S.srcVer++; $("vOrig").dataset.key = ""; ensureSource(); setView("orig"); await loadClips(); renderJob(); listProjects(); refreshButtons(); applyPreview();
+  } catch (e) { toast(e.message, "bad"); }
 }
 function newProject(keepFile) {
   clearTimeout(S.timer);
@@ -376,7 +402,7 @@ function refreshButtons() {
   const ready = (have || S.file) && !busy && (p || !lookIsDefault() || false);
   $("go").disabled = busy || !(have || S.file);
   $("go").textContent = busy ? "⏳ Working…" : have ? "↻ Re-run" : "✨ Edit video";
-  $("analyzeOnly").disabled = busy;
+  $("analyzeOnly").disabled = busy; $("delBtn").classList.toggle("hidden", !have); $("delBtn").disabled = busy;
   $("hint").textContent = busy ? "Agent kaam kar raha hai…" : !(have || S.file) ? "Pehle video choose karo" : !p && lookIsDefault() ? "Prompt likho ya Look chuno" : have ? "Analysis cached hai — re-run jaldi hota hai" : "Upload + analyze + edit";
   void ready;
 }
@@ -397,7 +423,8 @@ async function run(analyzeOnly) {
       if (needRef) { await waitIdle(); j = await api(`/jobs/${S.jobId}/edit`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ instruction: p }) }); S.job = j; }
       $("analyzeOnly").classList.add("hidden"); toast(analyzeOnly ? "Analyze shuru ho gaya." : "Agent shuru ho gaya.", "ok");
     } else {
-      if (!analyzeOnly && !p) { showTab("prompt"); return toast("Instruction likho ya Look & Effects chuno.", "warn"); }
+      if (analyzeOnly) { S.job = await api(`/jobs/${S.jobId}/analyze`, { method: "POST" }); toast("Analyze shuru ho gaya.", "ok"); ensureSource(); poll(); listProjects(); return; }
+      if (!p) { showTab("prompt"); return toast("Instruction likho ya Look & Effects chuno.", "warn"); }
       await api(`/jobs/${S.jobId}/look`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(S.look) });
       await api(`/jobs/${S.jobId}/caption-style`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(S.cap) });
       if ($("music").files[0]) { const m = new FormData(); m.append("file", $("music").files[0]); await api(`/jobs/${S.jobId}/music`, { method: "POST", body: m }); }
@@ -416,13 +443,15 @@ function poll() {
     S.job = j; renderJob(); renderChat();
     if (j.stages && j.stages.observe && j.stages.observe.status === "done" && !S.analysis) loadAnalysis();
     if (j.busy) { S.timer = setTimeout(poll, 1200); return; }
+    if (j.status === "uploaded") ensureSource();             // clips were changed: load the re-merged video
     await loadAnalysis(); if (j.status === "done") await loadResult();
-    refreshLog(); listProjects(); refreshButtons();
+    loadClips(); refreshLog(); listProjects(); refreshButtons();
   }).catch(e => { toast(e.message, "bad"); });
 }
 function renderJob() {
   const j = S.job; if (!j) return;
   const quiet = j.status === "done" && !(j.warnings || []).length; $("progCard").classList.toggle("hidden", quiet);
+  $("analyzeOnly").classList.toggle("hidden", j.status !== "uploaded");
   const compact = j.status === "done" || j.status === "analyzed"; $("steps").classList.toggle("hidden", compact); document.querySelector("#progCard .pbar").classList.toggle("hidden", compact); refreshButtons();
   const order = ["analyzing", "planning", "rendering", "validating", "done"];
   const cur = j.status === "revising" ? "rendering" : j.status === "exporting" ? "validating" : j.status === "analyzed" ? "planning" : j.status;
@@ -456,7 +485,7 @@ function setTrack(video, url) {
 }
 $("ccBtn").onclick = () => { S.cc = !S.cc; const t = $("vOrig").textTracks[0]; if (t) t.mode = S.cc ? "showing" : "hidden"; $("ccBtn").style.opacity = S.cc ? 1 : .55; };
 function ensureSource() {
-  if (!S.jobId) return; const v = $("vOrig"), u = `/api/jobs/${S.jobId}/video?kind=source`;
+  if (!S.jobId) return; const v = $("vOrig"), u = `/api/jobs/${S.jobId}/video?kind=source&v=${S.srcVer || 0}`;
   if (v.dataset.key !== u) { const t = v.currentTime; v.dataset.key = u; /* keep local blob until server copy exists */ v.src = u; v.load(); v.muted = false; v.volume = 1; }
 }
 async function loadResult() {
@@ -466,7 +495,7 @@ async function loadResult() {
   const v = $("vEdit");
   if (v.dataset.key !== u) { v.dataset.key = u; v.src = u; v.load(); v.muted = false; v.volume = 1; fileAudioCheck(); setView("edit"); } else setView(S.view);
   try { S.edl = await api(`/jobs/${S.jobId}/edl`); } catch (e) { S.edl = null; }
-  renderTimeline(); renderDecisions(j);
+  renderTimeline(); renderDecisions(j); renderCapEditor();
   $("dl").classList.remove("hidden");
   $("dlVideo").href = `/api/jobs/${S.jobId}/download`; $("dlSrt").href = `/api/jobs/${S.jobId}/captions/download?kind=final&format=srt`; $("dlVtt").href = `/api/jobs/${S.jobId}/captions/download?kind=final&format=vtt`;
   $("dlSrt").classList.toggle("hidden", !(S.edl && S.edl.captions && S.edl.captions.length)); $("dlVtt").classList.toggle("hidden", !(S.edl && S.edl.captions && S.edl.captions.length));
@@ -526,10 +555,11 @@ $("retrans").onclick = async () => {
 /* ---------------- projects list ---------------- */
 async function listProjects() {
   try {
-    const list = await api("/jobs"); if (!list.length) return;
+    const list = await api("/jobs"); S.list = list;
+    if (!list.length) { $("projList").innerHTML = `<p class="dim" style="margin:6px">Abhi koi project nahi.</p>`; return; }
     list.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
-    $("projList").innerHTML = list.map(j => { const busy = !["done", "failed", "analyzed", "uploaded"].includes(j.status); return `<button class="proj ${j.id === S.jobId ? "on" : ""}" data-id="${j.id}"><span class="st ${j.status === "done" ? "done" : j.status === "failed" ? "failed" : busy ? "busy" : ""}">${esc(j.status)}</span><b>${esc(j.filename || j.id)}</b><small>${esc((j.created || "").slice(5, 16))}${j.instruction ? " · " + esc(j.instruction.slice(0, 22)) : ""}</small></button>`; }).join("");
-    document.querySelectorAll(".proj").forEach(b => b.onclick = () => openJob(b.dataset.id));
+    $("projList").innerHTML = list.map(j => { const busy = !["done", "failed", "analyzed", "uploaded"].includes(j.status); return `<button class="proj ${j.id === S.jobId ? "on" : ""}" data-id="${j.id}"><span class="pdel" data-del="${j.id}" title="Delete project">🗑</span><span class="st ${j.status === "done" ? "done" : j.status === "failed" ? "failed" : busy ? "busy" : ""}">${esc(j.status)}</span><b>${esc(j.filename || j.id)}</b><small>${esc((j.created || "").slice(5, 16))}${j.instruction ? " · " + esc(j.instruction.slice(0, 22)) : ""}</small></button>`; }).join("");
+    document.querySelectorAll(".proj").forEach(b => b.onclick = ev => { const d = ev.target.closest(".pdel"); if (d) { ev.stopPropagation(); delProject(d.dataset.del); } else openJob(b.dataset.id); });
   } catch (e) {}
 }
 async function openJob(id) {
@@ -541,7 +571,7 @@ async function openJob(id) {
     try { const r = await api(`/jobs/${id}/reference`); S.ref = r.profile ? r : null; renderRef(S.ref); } catch (e) { renderRef(null); }
     $("hero").classList.add("hidden"); $("stage").classList.remove("hidden"); $("vOrig").dataset.key = ""; ensureSource();
     $("fileChip").classList.remove("hidden"); $("fileChip").innerHTML = `📁 <b>${esc(j.filename || id)}</b>`;
-    renderJob(); poll();
+    renderJob(); poll(); loadClips();
   } catch (e) { toast(e.message, "bad"); }
 }
 
@@ -636,6 +666,119 @@ async function loadTakes() {
       `<span class="chip" title="fillers ${x.fillers} · stutters ${x.stutters} · hesitations ${x.pauses} · ${x.rate} words/s">${x.kept ? "✅ kept" : "✂ cut"} take ${i + 1} · ${(x.score * 100).toFixed(0)}%</span>`).join("")}</div>`).join("");
   } catch (e) {}
 }
+
+/* ---------------- delete project ---------------- */
+async function delProject(id) {
+  const it = (S.list || []).find(x => x.id === id), name = it ? it.filename : id;
+  if (!confirm(`"${name}" project delete karna hai?\nClips, analysis aur edited video sab hamesha ke liye hat jayenge.`)) return;
+  try { await api(`/jobs/${id}`, { method: "DELETE" }); } catch (e) { return toast(e.message, "bad"); }
+  if (id === S.jobId) { newProject(false); $("prompt").value = ""; syncQuick(); S.look = { ...DEFAULT_LOOK }; syncLook(); }
+  toast("Project delete ho gaya.", "ok"); listProjects();
+}
+$("delBtn").onclick = () => S.jobId && delProject(S.jobId);
+
+/* ---------------- clips (media bin): add / reorder / trim / delete ---------------- */
+S.srcVer = 0; S.clips = null;
+async function loadClips() {
+  if (!S.jobId) return;
+  try { S.clips = await api(`/jobs/${S.jobId}/clips`); } catch (e) { return; }
+  renderClips();
+}
+function renderClips() {
+  const v = S.clips, busy = !!(S.job && S.job.busy);
+  if (!S.jobId || !v || !v.clips.length) { $("clipsCard").classList.add("hidden"); return; }
+  $("clipsCard").classList.remove("hidden");
+  $("clipsInfo").textContent = `${v.clips.length} clip(s) · ${v.total.toFixed(1)}s total${busy ? " · working…" : ""}`;
+  $("addClipsBtn").disabled = busy;
+  if ($("clipList").contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;   // user is typing a trim value
+  $("clipList").innerHTML = v.clips.map((c, i) => `<div class="clip" data-i="${i}">
+    <img src="/api/jobs/${S.jobId}/clips/${c.id}/thumb" alt="" data-seek="${c.offset}" title="Original player mein yahan jao" onerror="this.style.visibility='hidden'">
+    <div><b title="${esc(c.name)}">${i + 1}. ${esc(c.name)}</b>
+      <small>${c.length.toFixed(1)}s${c.length < c.duration - 0.05 ? ` (trimmed, original ${c.duration.toFixed(1)}s)` : ""} · ${c.width}×${c.height}${c.has_audio ? "" : " · no audio"}</small>
+      <div class="trim">✂ start <input type="number" step="0.1" min="0" max="${c.duration}" value="${c.trim_start.toFixed(1)}" data-k="trim_start" ${busy ? "disabled" : ""}> end <input type="number" step="0.1" min="0" max="${c.duration}" value="${c.trim_end.toFixed(1)}" data-k="trim_end" ${busy ? "disabled" : ""}> s</div></div>
+    <div class="ctl"><button class="ibtn" data-act="up" title="Upar" ${i === 0 || busy ? "disabled" : ""}>↑</button><button class="ibtn" data-act="down" title="Neeche" ${i === v.clips.length - 1 || busy ? "disabled" : ""}>↓</button><button class="ibtn del" data-act="del" title="${v.clips.length === 1 ? "Aakhri clip hai - poora project hatana ho to Delete project dabao" : "Clip hatao"}" ${v.clips.length === 1 || busy ? "disabled" : ""}>🗑</button></div></div>`).join("");
+}
+function clipList() { return S.clips.clips.map(c => ({ id: c.id, trim_start: c.trim_start, trim_end: c.trim_end >= c.duration - 0.05 ? null : c.trim_end })); }
+function staleResult() {                                      // the source changed: the old edit / analysis no longer matches
+  Object.assign(S, { hasOutput: false, analysis: null, edl: null }); S.srcVer++; $("vOrig").dataset.key = "";
+  $("views").querySelector('[data-v="edit"]').disabled = true; $("views").querySelector('[data-v="both"]').disabled = true;
+  $("boxEdit").classList.add("hidden"); $("soundRow").classList.add("hidden"); $("vEdit").removeAttribute("src"); $("vEdit").dataset.key = "";
+  ["tlCard", "repCard", "anCard", "chatCard", "ccBtn"].forEach(id => $(id).classList.add("hidden")); $("dl").classList.add("hidden");
+  segSig = ""; $("segEditor").innerHTML = `<p class="dim" style="font-size:12px">Pehle video analyze hone do (Edit video ya Analyze only).</p>`;
+  $("saveSegs").disabled = true; setView("orig"); renderCapEditor();
+}
+async function putClips(list) {
+  try {
+    const r = await api(`/jobs/${S.jobId}/clips`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clips: list }) });
+    S.job = r.job; S.clips = { clips: r.clips, total: r.total }; staleResult(); renderClips(); renderJob(); poll();
+  } catch (e) { toast(e.message, "bad"); loadClips(); }
+}
+async function addClips(files) {
+  if (!S.jobId) return setFiles(files);
+  try {
+    toast(`${files.length} clip(s) upload ho rahi hain…`);
+    const fd = new FormData(); files.forEach(f => fd.append("file", f));
+    const r = await api(`/jobs/${S.jobId}/clips`, { method: "POST", body: fd });
+    S.job = r.job; S.clips = { clips: r.clips, total: r.total }; staleResult(); renderClips(); renderJob(); poll();
+  } catch (e) { toast(e.message, "bad"); loadClips(); }
+}
+$("addClipsBtn").onclick = () => $("addClips").click();
+$("addClips").onchange = e => { const fs = [...e.target.files]; e.target.value = ""; if (fs.length) addClips(fs); };
+$("clipList").addEventListener("click", ev => {
+  const img = ev.target.closest("img[data-seek]"); if (img) { setView("orig"); $("vOrig").currentTime = +img.dataset.seek; return; }
+  const b = ev.target.closest("button[data-act]"); if (!b || b.disabled) return;
+  const i = +b.closest(".clip").dataset.i, l = clipList();
+  if (b.dataset.act === "del") { if (!confirm("Ye clip project se hata dein?")) return; l.splice(i, 1); }
+  else { const j = b.dataset.act === "up" ? i - 1 : i + 1; [l[i], l[j]] = [l[j], l[i]]; }
+  putClips(l);
+});
+$("clipList").addEventListener("change", ev => {
+  const inp = ev.target.closest("input[data-k]"); if (!inp) return;
+  const row = inp.closest(".clip"), i = +row.dataset.i, l = clipList(), c = S.clips.clips[i];
+  const ts = parseFloat(row.querySelector('[data-k="trim_start"]').value), te = parseFloat(row.querySelector('[data-k="trim_end"]').value);
+  if (isNaN(ts) || isNaN(te) || te - ts < 0.3) { toast("Trim: end, start se kam se kam 0.3s zyada hona chahiye.", "warn"); renderClips(); return; }
+  l[i].trim_start = Math.max(0, ts); l[i].trim_end = te >= c.duration - 0.05 ? null : te; putClips(l);
+});
+
+/* ---------------- editable captions (burned into the final video) ---------------- */
+let capSig = "";
+function renderCapEditor() {
+  const ok = !!S.edl, caps = (S.edl && S.edl.captions) || [], box = $("capEditor");
+  $("capApply").disabled = $("capAdd").disabled = !ok; $("capRegen").disabled = !ok;
+  if (!ok) { box.innerHTML = `<p class="dim" style="font-size:12px">Pehle video edit hone do (Prompt tab → Edit video).</p>`; capSig = ""; return; }
+  const sig = S.jobId + JSON.stringify(caps.map(c => [c.start, c.end, c.text]));
+  if (sig === capSig || box.contains(document.activeElement)) return; capSig = sig; drawCapRows(caps);
+}
+function drawCapRows(caps) {
+  $("capEditor").innerHTML = caps.length ? caps.map(c => `<div class="cap-row"><input data-k="s" value="${(+c.start).toFixed(2)}" aria-label="start"><input data-k="e" value="${(+c.end).toFixed(2)}" aria-label="end"><input data-k="t" value="${esc(c.text)}" aria-label="caption text"><button class="ibtn" data-act="seek" title="Yahan se play karo">▶</button><button class="ibtn del" data-act="del" title="Ye caption hatao">🗑</button></div>`).join("")
+    : `<p class="dim" style="font-size:12px">Is video mein koi caption nahi. “＋ Add line” se likho ya “↺ From speech”.</p>`;
+}
+function readCapRows() { return [...document.querySelectorAll("#capEditor .cap-row")].map(r => ({ start: parseFloat(r.querySelector('[data-k="s"]').value), end: parseFloat(r.querySelector('[data-k="e"]').value), text: r.querySelector('[data-k="t"]').value })); }
+$("capEditor").addEventListener("click", ev => {
+  const b = ev.target.closest("button[data-act]"); if (!b) return; const row = b.closest(".cap-row");
+  if (b.dataset.act === "del") row.remove();
+  else { const t = parseFloat(row.querySelector('[data-k="s"]').value); if (!isNaN(t)) { setView(S.view === "orig" ? "edit" : S.view); $("vEdit").currentTime = t; $("vEdit").play().catch(() => {}); } }
+});
+$("capAdd").onclick = () => {
+  const rows = readCapRows().filter(r => !isNaN(r.start) && !isNaN(r.end)).sort((a, b) => a.start - b.start); let t = $("vEdit").currentTime || 0;
+  const over = rows.find(r => r.start <= t && t < r.end); if (over) t = over.end + 0.02;          // playhead is inside a caption -> put the new line right after it
+  const nxt = rows.find(r => r.start > t); let e = t + 1.5; if (nxt) e = Math.min(e, nxt.start - 0.02); if (e - t < 0.3) e = t + 0.3;
+  rows.push({ start: +t.toFixed(2), end: +e.toFixed(2), text: "" }); rows.sort((a, b) => a.start - b.start);
+  drawCapRows(rows); const i = rows.findIndex(r => r.text === ""), el = document.querySelectorAll("#capEditor .cap-row")[i];
+  if (el) { el.scrollIntoView({ block: "nearest" }); el.querySelector('[data-k="t"]').focus(); }
+};
+$("capApply").onclick = async () => {
+  const raw = readCapRows(), lines = raw.filter(l => l.text.trim() && !isNaN(l.start) && !isNaN(l.end) && l.end - l.start >= 0.1), skipped = raw.filter(l => l.text.trim()).length - lines.length;
+  if (skipped > 0) toast(`${skipped} line skip hui (time galat ya 0.1s se chhoti).`, "warn");
+  const body = { captions: lines }; if (S.cap.preset !== "auto") body.preset = S.cap.preset; if (S.cap.size !== "auto") body.size = S.cap.size;
+  try { S.job = await api(`/jobs/${S.jobId}/captions/edit`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); S.hasOutput = false; capSig = ""; toast("Captions apply ho rahe hain…", "ok"); renderJob(); poll(); }
+  catch (e) { toast(e.message, "bad"); }
+};
+$("capRegen").onclick = async () => {
+  if (!confirm("Tumhare manual caption edits hat jayenge aur captions speech se dobara bante hain. Continue?")) return;
+  try { S.job = await api(`/jobs/${S.jobId}/captions/regenerate`, { method: "POST" }); S.hasOutput = false; capSig = ""; toast("Captions dobara ban rahe hain…", "ok"); renderJob(); poll(); }
+  catch (e) { toast(e.message, "bad"); }
+};
 
 syncLook(); syncQuick(); listProjects(); refreshButtons();
 </script>

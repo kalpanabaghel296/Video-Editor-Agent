@@ -165,6 +165,7 @@ class EDL(BaseModel):
     overlays: List[Overlay] = []
     reframes: List[Reframe] = []
     explanation: List[str] = []
+    warnings: List[str] = []                           # shown to the user (e.g. "source is shorter than the requested length")
     requirements: Optional[Dict[str, Any]] = None
 
     def timeline_duration(self) -> float:

@@ -4,6 +4,8 @@ Pass 1: trim + aspect fit + punch-in zoom + fades + concat  -> work/base.mp4
 Pass 2: caption burn-in + background music with ducking     -> output/draft.mp4
 Every advanced feature has a fallback: failure never kills the render, it degrades.
 """
+import hashlib
+import json
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -108,6 +110,8 @@ def build_base_cmd(edl: EDL, out: Path, use_effects: bool, denoise: bool = False
                 a += f",afade=t=in:st=0:d={fin:.3f}"
             if fout:
                 a += f",afade=t=out:st={d - fout:.3f}:d={fout:.3f}"
+            elif i == n - 1 and c.source_end < edl.source_media.duration - 0.05 and d > 0.5:
+                a += f",afade=t=out:st={d - 0.12:.3f}:d=0.12"      # exact-length cut may land inside a word: soften the stop
             parts.append(a + f"[a{i}]")
             labels.append(f"[a{i}]")
     if has_a and normalize:
@@ -222,8 +226,51 @@ def _post_cmd(base: Path, out: Path, edl: EDL, work: Path, cap_mode: Optional[st
 ]
 
 
-def render(edl: EDL, job_dir: Path, level: int = 0) -> RenderResult:
-    """level: 0 = everything, 1 = no effects/transitions, 2 = plain captions & no music, 3 = bare cuts."""
+def _base_sig(edl: EDL, level: int) -> str:
+    """Fingerprint of everything that goes into base.mp4 (+look). Captions, titles, music and SFX are NOT part of it,
+    because they are added in the second pass - so changing a caption never needs the slow first pass again."""
+    a = edl.audio
+    data = {"level": level, "src": edl.source_media.model_dump(), "project": edl.project.model_dump(),
+            "clips": [c.model_dump(exclude={"label", "score"}) for c in edl.clips],
+            "effects": [e.model_dump() for e in edl.effects], "transitions": [t.model_dump() for t in edl.transitions],
+            "reframes": [r.model_dump() for r in edl.reframes],
+            "audio": {"denoise": a.denoise, "level": a.denoise_level, "keep": a.keep_original}}
+    try:
+        data["src_mtime"] = Path(edl.source_media.path).stat().st_mtime_ns
+    except OSError:
+        pass
+    return hashlib.sha1(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _video_duration(path: Path) -> float:
+    try:
+        from ..utils.ffmpeg import ffprobe_json
+        return float(ffprobe_json(path).get("format", {}).get("duration") or 0)
+    except Exception:
+        return 0.0
+
+
+def conform_duration(path: Path, planned: float, tol: float = 0.06) -> Optional[str]:
+    """The finished file must be as long as the plan (= the length the user asked for). Encoders pad audio / keyframe-cut
+    with `-c copy`, so a file can come out a few frames too long: trim it back (re-encode, only when needed)."""
+    actual = _video_duration(path)
+    if actual <= planned + tol:
+        return None
+    tmp = path.with_name(path.stem + "_conf.mp4")
+    try:
+        run(["ffmpeg", "-y", "-hide_banner", "-i", str(path), "-t", f"{planned:.3f}", "-c:v", "libx264", "-preset", "veryfast",
+             "-crf", "20", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(tmp)])
+        shutil.move(str(tmp), str(path))
+        return f"Length trimmed from {actual:.2f}s to {planned:.2f}s"
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        return None
+
+
+def render(edl: EDL, job_dir: Path, level: int = 0, captions_only: bool = False) -> RenderResult:
+    """level: 0 = everything, 1 = no effects/transitions, 2 = plain captions & no music, 3 = bare cuts.
+    captions_only: re-use work/base*.mp4 of the previous render when nothing but captions / title / music / SFX changed
+    (a caption edit then takes seconds instead of a full re-render). Falls back to the full render automatically."""
     work, out_dir = (job_dir / "work").resolve(), (job_dir / "output").resolve()
     work.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -231,62 +278,81 @@ def render(edl: EDL, job_dir: Path, level: int = 0) -> RenderResult:
     if not edl.clips:
         raise RenderError("EDL has no clips")
     base, draft = work / "base.mp4", out_dir / "draft.mp4"
-    has_effects = bool(edl.effects or edl.transitions or getattr(edl.project, "color_grade", False)
-                       or edl.reframes or edl.project.fit == "blur")
-    want_dn = level < 3 and edl.audio.denoise and edl.source_media.has_audio
-    clean_wav: Optional[Path] = None
-    if want_dn:                                           # audio-only noise removal; video + timeline stay untouched
+    state_f, sig = work / "render_state.json", _base_sig(edl, level)
+    reused = False
+    if captions_only and level == 0:
         try:
-            clean_wav = dn_mod.clean_audio(Path(edl.source_media.path), work / "audio_clean.wav", work,
-                                           edl.audio.denoise_level, edl.source_media.duration)
+            st = json.loads(state_f.read_text(encoding="utf-8"))
+            cand = work / st["base"]
+            if st.get("sig") == sig and cand.exists():
+                base, reused = cand, True
         except Exception:
-            clean_wav = None                              # -> falls back to the ffmpeg filter chain below
-    # (use effects, noise mode, loudness-normalize) from richest to safest
-    gain_db = _auto_gain(clean_wav or Path(edl.source_media.path)) if edl.source_media.has_audio else 0.0
-    first_dn = "spectral" if clean_wav else ("chain" if want_dn else "off")
-    attempts = [(level < 1, first_dn, True)]
-    if level < 1 and has_effects:
-        attempts.append((False, first_dn, True))
-    if want_dn and first_dn == "spectral":
-        attempts.append((False, "chain", True))
-    if want_dn:
-        attempts.append((False, "off", True))
-    attempts.append((False, "off", False))
-    seen, uniq = set(), []
-    for at in attempts:
-        if at not in seen:
-            seen.add(at)
-            uniq.append(at)
-    attempts = uniq
-    last: Optional[Exception] = None
-    for i, (fx, dnm, norm) in enumerate(attempts):
-        try:
-            run(build_base_cmd(edl, base, use_effects=fx, denoise=(dnm == "chain"),
-                               clean_audio=clean_wav if dnm == "spectral" else None, normalize=norm, gain_db=gain_db))
-            if i > 0:
-                if fx != attempts[0][0]:
-                    warnings.append("Effects/transitions failed — fell back to hard cuts")
-                if want_dn and dnm == "off":
-                    warnings.append("Noise reduction failed — exported without it")
-                elif want_dn and dnm != first_dn:
-                    warnings.append("Spectral noise reduction failed — used the simpler filter")
-                if not norm:
-                    warnings.append("Loudness normalisation failed — exported without it")
-            elif want_dn and first_dn == "chain":
-                warnings.append("Spectral noise reduction unavailable (numpy?) — used the simpler filter")
-            last = None
-            break
-        except FFmpegError as e:
-            last = e
-    if last is not None:
-        raise RenderError(f"Base render failed: {last}")
+            reused = False
+    state_f.unlink(missing_ok=True)                        # invalid until this render finished richly
+    if not reused:
+        look_ok = True
+        has_effects = bool(edl.effects or edl.transitions or getattr(edl.project, "color_grade", False)
+                           or edl.reframes or edl.project.fit == "blur")
+        want_dn = level < 3 and edl.audio.denoise and edl.source_media.has_audio
+        clean_wav: Optional[Path] = None
+        if want_dn:                                           # audio-only noise removal; video + timeline stay untouched
+            try:
+                clean_wav = dn_mod.clean_audio(Path(edl.source_media.path), work / "audio_clean.wav", work,
+                                               edl.audio.denoise_level, edl.source_media.duration)
+            except Exception:
+                clean_wav = None                              # -> falls back to the ffmpeg filter chain below
+        # (use effects, noise mode, loudness-normalize) from richest to safest
+        gain_db = _auto_gain(clean_wav or Path(edl.source_media.path)) if edl.source_media.has_audio else 0.0
+        first_dn = "spectral" if clean_wav else ("chain" if want_dn else "off")
+        attempts = [(level < 1, first_dn, True)]
+        if level < 1 and has_effects:
+            attempts.append((False, first_dn, True))
+        if want_dn and first_dn == "spectral":
+            attempts.append((False, "chain", True))
+        if want_dn:
+            attempts.append((False, "off", True))
+        attempts.append((False, "off", False))
+        seen, uniq = set(), []
+        for at in attempts:
+            if at not in seen:
+                seen.add(at)
+                uniq.append(at)
+        attempts = uniq
+        last: Optional[Exception] = None
+        for i, (fx, dnm, norm) in enumerate(attempts):
+            try:
+                run(build_base_cmd(edl, base, use_effects=fx, denoise=(dnm == "chain"),
+                                   clean_audio=clean_wav if dnm == "spectral" else None, normalize=norm, gain_db=gain_db))
+                if i > 0:
+                    if fx != attempts[0][0]:
+                        warnings.append("Effects/transitions failed — fell back to hard cuts")
+                    if want_dn and dnm == "off":
+                        warnings.append("Noise reduction failed — exported without it")
+                    elif want_dn and dnm != first_dn:
+                        warnings.append("Spectral noise reduction failed — used the simpler filter")
+                    if not norm:
+                        warnings.append("Loudness normalisation failed — exported without it")
+                elif want_dn and first_dn == "chain":
+                    warnings.append("Spectral noise reduction unavailable (numpy?) — used the simpler filter")
+                last = None
+                break
+            except FFmpegError as e:
+                last = e
+        if last is not None:
+            raise RenderError(f"Base render failed: {last}")
 
-    if level < 3 and not edl.project.look.is_default:      # colour / filters / effects (captions are added after, so they stay clean)
-        try:
-            base = look_mod.apply_look(base, work / "base_look.mp4", edl)
-        except FFmpegError:
-            warnings.append("Look / filters could not be applied — exported without them")
+        if level < 3 and not edl.project.look.is_default:      # colour / filters / effects (captions are added after, so they stay clean)
+            try:
+                base = look_mod.apply_look(base, work / "base_look.mp4", edl)
+            except FFmpegError:
+                warnings.append("Look / filters could not be applied — exported without them")
+                look_ok = False
 
+        if level == 0 and not warnings and look_ok:      # richest render worked -> its base can be re-used for caption edits
+            try:
+                state_f.write_text(json.dumps({"sig": sig, "base": base.name}), encoding="utf-8")
+            except OSError:
+                pass
     want_caps = level < 3 and edl.caption_settings.enabled and bool(edl.captions)
     want_ov = level < 3 and bool(edl.overlays)
     want_music = level < 2 and edl.audio.music
@@ -335,4 +401,5 @@ def render(edl: EDL, job_dir: Path, level: int = 0) -> RenderResult:
             cap.write_vtt(edl.captions, work / "captions.vtt")
         except Exception:
             pass
+    conform_duration(draft, edl.timeline_duration())      # exact length: never a few frames too long
     return RenderResult(path=draft, warnings=warnings)

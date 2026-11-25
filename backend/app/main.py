@@ -31,6 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from . import config
 from .agents import loop, planner, presets, revise
+from .agents import captions_edit
 from .analysis import reference as reference_mod
 from .analysis import takes as takes_mod
 from .analysis.pipeline import load_analysis
@@ -38,6 +39,7 @@ from .editing import reframe as reframe_mod
 from .editing.captions import transcript_to_captions, write_srt, write_vtt
 from .models.edl import EDL, Look
 from .models.transcript import Segment, Transcript, Word
+from .services import clips as clips_mod
 from .services.jobs import JobStore
 from .utils.errors import friendly
 from .utils.ffmpeg import FFmpegError, ffmpeg_status, ffprobe_json, run as ff_run
@@ -162,24 +164,61 @@ def _require_video(path: Path) -> None:
         raise HTTPException(400, "Is file me video stream nahi mili — koi valid video upload karo.")
 
 
-@app.post("/api/jobs")
-async def create_job(file: UploadFile = File(...), instruction: Optional[str] = Form(None),
-                     music: Optional[UploadFile] = File(None), look: Optional[str] = Form(None),
-                     caption_style: Optional[str] = Form(None)):
-    ext = Path(file.filename or "").suffix.lower()
+def _rebuild_source(job_id: str) -> None:
+    """Background task: merge the clips into source/input.mp4 and reset the (now stale) analysis / output."""
+    try:
+        store.set_stage(job_id, "observe", "pending", "")
+        clips_mod.build_source(store.path(job_id))
+        store.reset_all(job_id, "Source rebuilt from clips")
+        store.update(job_id, busy=False)
+    except Exception as e:
+        store.log(job_id, f"FAILED merging clips: {e}")
+        store.update(job_id, status="failed", busy=False, error=friendly(e), error_raw=str(e))
+
+
+def _store_clip(job_id: str, up: UploadFile) -> None:
+    ext = Path(up.filename or "").suffix.lower()
     if ext not in config.ALLOWED_EXT:
         raise HTTPException(400, f"Unsupported file type '{ext}'. Allowed: {sorted(config.ALLOWED_EXT)}")
+    jd = store.path(job_id)
+    dest = clips_mod.new_clip_path(jd, ext)
+    _save_upload(up, dest, config.MAX_UPLOAD_MB)
+    _require_video(dest)
+    clips_mod.register(jd, dest, up.filename or dest.name)
+    store.log(job_id, f"Clip added: {up.filename}")
+
+
+@app.post("/api/jobs")
+async def create_job(file: List[UploadFile] = File(...), instruction: Optional[str] = Form(None),
+                     music: Optional[UploadFile] = File(None), look: Optional[str] = Form(None),
+                     caption_style: Optional[str] = Form(None), defer: bool = Form(False)):
+    """One OR several videos (send the form field `file` several times). defer=true: only create the project
+    (the UI then lets you arrange the clips first and starts the analysis with Edit video / Analyze)."""
+    files = [f for f in file if f.filename]
+    if not files:
+        raise HTTPException(400, "Koi video file nahi mili.")
+    if len(files) > clips_mod.MAX_CLIPS:
+        raise HTTPException(400, f"Ek project mein max {clips_mod.MAX_CLIPS} clips.")
+    for f in files:
+        ext = Path(f.filename or "").suffix.lower()
+        if ext not in config.ALLOWED_EXT:
+            raise HTTPException(400, f"Unsupported file type '{ext}'. Allowed: {sorted(config.ALLOWED_EXT)}")
     st = ffmpeg_status()
     if not st["ok"]:                                       # fail fast with a clear message instead of a failed job later
         raise HTTPException(503, st["message"])
-    job_id = store.create(file.filename or f"video{ext}")
-    dest = store.path(job_id) / "source" / f"input{ext}"
+    job_id = store.create(files[0].filename or "video")
     try:
-        _save_upload(file, dest, config.MAX_UPLOAD_MB)
-        _require_video(dest)
+        for f in files:
+            _store_clip(job_id, f)
+        clips_mod.build_source(store.path(job_id))
     except HTTPException:
         shutil.rmtree(store.path(job_id), ignore_errors=True)
         raise
+    except Exception as e:
+        shutil.rmtree(store.path(job_id), ignore_errors=True)
+        raise HTTPException(400, f"Clips merge nahi ho paye: {friendly(e)}")
+    if len(files) > 1:
+        store.update(job_id, filename=f"{files[0].filename} + {len(files) - 1} more")
     if music is not None and music.filename:
         _save_music(job_id, music)
     if look:
@@ -197,9 +236,90 @@ async def create_job(file: UploadFile = File(...), instruction: Optional[str] = 
             raise HTTPException(400, "caption_style must be JSON like {\"preset\":\"hormozi\",\"size\":\"large\"}")
     if instruction and instruction.strip():
         _submit(job_id, loop.run_agent, store, job_id, instruction.strip())
-    else:
+    elif not defer:
         _submit(job_id, _analyze_only, job_id)
     return store.load(job_id)
+
+
+@app.post("/api/jobs/{job_id}/analyze")
+def analyze(job_id: str):
+    _job(job_id)
+    _submit(job_id, _analyze_only, job_id)
+    return store.load(job_id)
+
+
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str):
+    """Delete the whole project (clips, merged source, analysis, outputs)."""
+    _job(job_id)
+    if job_id in _running:
+        raise HTTPException(409, "Job abhi chal raha hai - khatam hone do, phir delete karo.")
+    store.delete(job_id)
+    return {"deleted": job_id}
+
+
+# ---------------- clips (media bin) ----------------
+@app.get("/api/jobs/{job_id}/clips")
+def get_clips(job_id: str):
+    _job(job_id)
+    return clips_mod.view(store.path(job_id))
+
+
+@app.post("/api/jobs/{job_id}/clips")
+def add_clips(job_id: str, file: List[UploadFile] = File(...)):
+    """Add more videos to the project. The clips are merged again in the background."""
+    _job(job_id)
+    if job_id in _running:
+        raise HTTPException(409, "job already running")
+    files = [f for f in file if f.filename]
+    if not files:
+        raise HTTPException(400, "Koi video file nahi mili.")
+    if len(clips_mod.load(store.path(job_id))) + len(files) > clips_mod.MAX_CLIPS:
+        raise HTTPException(400, f"Ek project mein max {clips_mod.MAX_CLIPS} clips.")
+    before = len(clips_mod.load(store.path(job_id)))
+    try:
+        for f in files:
+            _store_clip(job_id, f)
+    finally:                                               # clips that were stored before an error still get merged
+        if len(clips_mod.load(store.path(job_id))) > before:
+            _submit(job_id, _rebuild_source, job_id)
+    return {"job": store.load(job_id), **clips_mod.view(store.path(job_id))}
+
+
+class ClipItem(BaseModel):
+    id: str
+    trim_start: float = 0.0
+    trim_end: Optional[float] = None
+
+
+class ClipsIn(BaseModel):
+    clips: List[ClipItem]
+
+
+@app.put("/api/jobs/{job_id}/clips")
+def put_clips(job_id: str, body: ClipsIn):
+    """New order + trims. A clip that is missing from the list is deleted."""
+    _job(job_id)
+    if job_id in _running:
+        raise HTTPException(409, "job already running")
+    try:
+        clips_mod.update(store.path(job_id), [c.model_dump() for c in body.clips])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _submit(job_id, _rebuild_source, job_id)
+    return {"job": store.load(job_id), **clips_mod.view(store.path(job_id))}
+
+
+@app.get("/api/jobs/{job_id}/clips/{clip_id}/thumb")
+def clip_thumb(job_id: str, clip_id: str):
+    _job(job_id)
+    c = next((x for x in clips_mod.load(store.path(job_id)) if x["id"] == clip_id), None)
+    if c is None:
+        raise HTTPException(404, "clip not found")
+    t = clips_mod.thumb(store.path(job_id), c)
+    if t is None:
+        raise HTTPException(404, "thumbnail not available")
+    return FileResponse(t, media_type="image/jpeg")
 
 
 class EditRequest(BaseModel):
@@ -654,6 +774,46 @@ def download_captions(job_id: str, kind: str = "source", format: str = "srt"):
         raise HTTPException(404, f"captions not found for {kind}")
     media = "text/vtt; charset=utf-8" if fmt == "vtt" else "text/plain; charset=utf-8"
     return FileResponse(target, media_type=media, filename=f"captions_{kind}_{job_id}.{fmt}")
+
+
+class CapLine(BaseModel):
+    start: float
+    end: float
+    text: str
+
+
+class CapEditIn(BaseModel):
+    captions: List[CapLine]
+    preset: Optional[str] = None
+    size: Optional[str] = None
+
+
+@app.put("/api/jobs/{job_id}/captions/edit")
+def edit_captions(job_id: str, body: CapEditIn):
+    """Manual caption edit on the OUTPUT timeline (text, timing, add, delete). Only the captions are re-rendered:
+    cuts and length stay exactly the same."""
+    _job(job_id)
+    if job_id in _running:
+        raise HTTPException(409, "job already running")
+    if not (store.path(job_id) / "edl.json").exists():
+        raise HTTPException(404, "Pehle ek baar video edit karo - phir captions edit hote hain.")
+    if body.preset or body.size:
+        put_caption_style(job_id, CaptionStyleIn(preset=body.preset or get_caption_style(job_id).get("preset"),
+                                                 size=body.size or get_caption_style(job_id).get("size")))
+    _submit(job_id, loop.rerender_captions, store, job_id, [c.model_dump() for c in body.captions], False)
+    return store.load(job_id)
+
+
+@app.post("/api/jobs/{job_id}/captions/regenerate")
+def regenerate_captions(job_id: str):
+    """Throw away manual edits and build the captions from the speech transcript again."""
+    _job(job_id)
+    if job_id in _running:
+        raise HTTPException(409, "job already running")
+    if not (store.path(job_id) / "edl.json").exists():
+        raise HTTPException(404, "Pehle ek baar video edit karo.")
+    _submit(job_id, loop.rerender_captions, store, job_id, None, True)
+    return store.load(job_id)
 
 
 if config.FRONTEND_DIR.exists():

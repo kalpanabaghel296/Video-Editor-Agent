@@ -138,6 +138,42 @@ def subtract_all(base: List[Interval], cuts: List[Interval]) -> List[Interval]:
     return [x for x in out if x[1] - x[0] > 0.02]
 
 
+_KIND_RANK = {"long_pause": 0.0, "hesitation": 0.0, "filler": 1.0, "stutter": 2.0, "false_start": 2.0, "retake": 3.0}
+
+
+def _fill_gaps(ivs: List[Interval], window: Interval, target: float, fumbles) -> List[Interval]:
+    """Grow the selection to `target` seconds by giving back material that was cut.
+    Order (least harmful first): pauses -> material at the edges -> unused speech -> fillers -> stutters -> re-takes.
+    Works on gaps INSIDE the selection too (the old code only grew at the outer edges)."""
+    ivs = sorted(ivs)
+    need = target - _total(ivs)
+    if need <= 0.02:
+        return ivs
+    first_s = ivs[0][0] if ivs else window[0]
+    last_e = ivs[-1][1] if ivs else window[1]
+    ranked = []
+    for g in subtract_all([window], ivs):
+        if g[1] <= first_s + 1e-6:
+            rank, kind = 0.4, "lead"
+        elif g[0] >= last_e - 1e-6:
+            rank, kind = 0.4, "trail"
+        else:
+            hits = [_KIND_RANK.get(f.kind, 0.5) for f in fumbles if f.start < g[1] - 0.05 and f.end > g[0] + 0.05]
+            rank, kind = (max(hits) if hits else 0.5), "mid"
+        ranked.append((rank, g[0], g, kind))
+    ranked.sort(key=lambda x: (x[0], x[1]))
+    out = list(ivs)
+    for rank, _, g, kind in ranked:
+        if need <= 0.02:
+            break
+        take = min(g[1] - g[0], need)
+        # pauses / trailing material stay attached to the speech BEFORE them, everything else leads into the NEXT clip
+        piece = (g[0], g[0] + take) if (kind == "trail" or (kind == "mid" and rank < 0.45)) else (g[1] - take, g[1])
+        out.append(piece)
+        need -= take
+    return merge(sorted(out), 0.0)
+
+
 def _brain_cuts(req: Requirements, an: AnalysisBundle, win: Interval, source_path: Optional[str] = None):
     """Turn the brain's findings (analysis/fumbles.py) into cut intervals according to what the prompt allows."""
     audio = Path(source_path) if (source_path and an.metadata.has_audio) else None
@@ -348,11 +384,17 @@ def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
                 remaining = 0
         chosen.sort(key=lambda x: x[0])
         ivs = merge([iv for c in chosen for iv in c[2]])
+    length_warning: Optional[str] = None
     if target:
-        if _total(ivs) < target - 0.3:                    # still short: continue with free material next to the selection
+        # EXACT LENGTH: the user asked for `target` seconds -> the result must be `target` seconds (not shorter, not longer)
+        if _total(ivs) < target - 0.05:                   # short: continue with free material next to the selection ...
             ivs = _extend_to(ivs, subtract_all(free, ivs), target)
-        if _total(ivs) < target - 0.3 and total_free < target <= _total([window]):   # cuts left too little: give some back
-            ivs = _extend_to(ivs, subtract_all([window], ivs), target)
+        if _total(ivs) < target - 0.05:                   # ... then give back cut material (pauses first, bad takes last)
+            ivs = _fill_gaps(ivs, window, target, used_fumbles)
+        have = _total(ivs)
+        if have < target - 0.1:
+            length_warning = (f"Source mein sirf {have:.1f}s material hai, isliye {target:.0f}s ka video nahi ban sakta - "
+                              f"{have:.1f}s ka video mila. Lamba video / aur clips add karo.")
         left, trimmed = target, []                        # hard-trim to the exact target
         for s_, e_ in sorted(ivs):
             if left <= 0.02:
@@ -360,11 +402,14 @@ def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
             e2 = min(e_, s_ + left)
             trimmed.append((s_, e2))
             left -= e2 - s_
-        ivs = [x for x in trimmed if x[1] - x[0] >= MIN_CLIP] or trimmed[:1]     # no 0.03s slivers
-        if ivs and an.transcript.segments:                # land the last cut on the end of a word, not in the middle of one
+        ivs = [x for x in trimmed if x[1] - x[0] >= 0.1] or trimmed[:1]            # no tiny slivers
+        miss = min(target, have) - _total(ivs)
+        if miss > 0.02 and ivs:                           # a dropped sliver must not make the video shorter
+            ivs = _fill_gaps(ivs, window, _total(ivs) + miss, used_fumbles)
+        if ivs and an.transcript.segments:                # land the last cut on the end of a word - only if that keeps the length (+-0.02s)
             ends = [w.end for sg in an.transcript.segments for w in sg.words] or [sg.end for sg in an.transcript.segments]
             last_s, last_e = ivs[-1]
-            near = [x for x in ends if last_e - 0.35 <= x <= last_e + 0.3 and x - last_s >= MIN_CLIP and x <= dur]
+            near = [x for x in ends if abs(x - last_e) <= 0.02 and x - last_s >= MIN_CLIP and x <= dur]
             if near:
                 ivs[-1] = (last_s, min(max(near, key=lambda x: -abs(x - last_e)), dur))
     if not ivs:
@@ -460,6 +505,9 @@ def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
         ex.append("Applied natural cinematic color correction for balanced lighting and warm skin tones")
     if edl.overlays:
         ex.append(f"Added title card: \"{edl.overlays[0].text}\"")
+    if length_warning:
+        ex.append("WARNING: " + length_warning)
+        edl.warnings.append(length_warning)
     edl.explanation = ex
     return edl
 
