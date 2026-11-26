@@ -15,7 +15,7 @@ MAX_LINES = 500
 
 
 def clips_sig(edl: EDL) -> str:
-    raw = json.dumps([[round(c.source_start, 2), round(c.source_end, 2)] for c in edl.clips])
+    raw = json.dumps([[round(c.source_start, 2), round(c.source_end, 2)] for c in edl.clips] + [edl.caption_settings.language or ""])
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
@@ -84,7 +84,7 @@ def apply_override(edl: EDL, job_dir: Path) -> Optional[str]:
         data = json.loads(f.read_text(encoding="utf-8"))
         if data.get("sig") != clips_sig(edl):
             f.unlink(missing_ok=True)
-            return ("Clips / timing badal gaye, isliye tumhare manually edit kiye captions reset ho gaye - "
+            return ("Clips / timing / caption language badal gayi, isliye tumhare manually edit kiye captions reset ho gaye - "
                     "naye captions transcript se bane hain. Captions tab mein dobara edit kar sakte ho.")
         edl.captions = [Caption(**c) for c in data["captions"]]
         edl.explanation.append(f"Used your {len(edl.captions)} manually edited caption line(s)")

@@ -239,7 +239,11 @@
       <div class="sech">Caption look <span style="text-transform:none;letter-spacing:0;font-weight:400">(burned into the edited video)</span></div>
       <div class="chips" id="capPresets"></div>
       <div class="sech">Size</div><div class="chips" id="capSizes"></div>
-      <p class="mute" style="font-size:12px;margin:8px 0 0">Auto = prompt / platform decide (jaise “hormozi captions” ya Instagram Reel). Yahan kuch chuna to wahi jeetega. Hindi script ke liye font apne aap Nirmala UI ho jata hai.</p>
+      <p class="mute" style="font-size:12px;margin:8px 0 0">Auto = prompt / platform decide (jaise “hormozi captions” ya Instagram Reel). Yahan kuch chuna to wahi jeetega.</p>
+      <div class="sech">Caption language <span style="text-transform:none;letter-spacing:0;font-weight:400">(captions kis language mein likhe hon)</span></div>
+      <div class="chips" id="capLangs"></div>
+      <p class="mute" style="font-size:12px;margin:8px 0 8px">Auto = jaise bola gaya. Jis language mein bol rahe ho wahi chuno (jaise Hindi) to captions uski apni script mein aate hain (देवनागरी, ಕನ್ನಡ …). Doosri language chuno to captions translate hote hain (internet chahiye). Script ka font apne aap lagta hai.</p>
+      <button class="gbtn" id="capLangApply" disabled title="Video edit hone ke baad captions is language mein dobara lagao">🌐 Apply language</button>
       <div class="sech">Edit captions <span style="text-transform:none;letter-spacing:0;font-weight:400">(final video ke captions)</span></div>
       <p class="mute" style="font-size:12px;margin:0 0 10px">Pehle ek baar <b>Edit video</b> chalao. Phir kisi bhi caption ka text / time badlo, line add ya delete karo aur <b>Apply captions</b> dabao. Sirf captions dobara lagte hain — cuts aur video ki length wahi rehti hai (kuch seconds lagte hain). Upar chuna hua Caption look / Size bhi isi se lagta hai.</p>
       <div id="capEditor"><p class="dim" style="font-size:12px">Pehle video edit hone do.</p></div>
@@ -567,7 +571,7 @@ async function openJob(id) {
   try {
     const j = await api(`/jobs/${id}`); S.job = j; $("prompt").value = j.instruction && j.instruction !== LOOK_ONLY ? j.instruction : ""; syncQuick();
     try { S.look = { ...DEFAULT_LOOK, ...(await api(`/jobs/${id}/look`)) }; } catch (e) { S.look = { ...DEFAULT_LOOK }; } syncLook();
-    try { S.cap = { preset: "auto", size: "auto", ...(await api(`/jobs/${id}/caption-style`)) }; } catch (e) { S.cap = { preset: "auto", size: "auto" }; } syncCap();
+    try { S.cap = { preset: "auto", size: "auto", language: "auto", ...(await api(`/jobs/${id}/caption-style`)) }; } catch (e) { S.cap = { preset: "auto", size: "auto", language: "auto" }; } syncCap();
     try { const r = await api(`/jobs/${id}/reference`); S.ref = r.profile ? r : null; renderRef(S.ref); } catch (e) { renderRef(null); }
     $("hero").classList.add("hidden"); $("stage").classList.remove("hidden"); $("vOrig").dataset.key = ""; ensureSource();
     $("fileChip").classList.remove("hidden"); $("fileChip").innerHTML = `📁 <b>${esc(j.filename || id)}</b>`;
@@ -605,10 +609,27 @@ async function fileAudioCheck() {
 /* ---------------- caption look (UI choice wins over the prompt) ---------------- */
 const CAP_PRESETS = [["auto", "Auto"], ["classic", "Classic"], ["hormozi", "Hormozi"], ["minimal", "Minimal"], ["boxed", "Boxed"], ["karaoke", "Karaoke"]];
 const CAP_SIZES = [["auto", "Auto"], ["small", "Small"], ["normal", "Normal"], ["large", "Large"]];
-S.cap = { preset: "auto", size: "auto" };
+S.cap = { preset: "auto", size: "auto", language: "auto" };
 CAP_PRESETS.forEach(([k, l]) => { const c = document.createElement("button"); c.className = "chip"; c.dataset.k = k; c.textContent = l; c.onclick = () => { S.cap.preset = k; syncCap(); }; $("capPresets").appendChild(c); });
 CAP_SIZES.forEach(([k, l]) => { const c = document.createElement("button"); c.className = "chip"; c.dataset.k = k; c.textContent = l; c.onclick = () => { S.cap.size = k; syncCap(); }; $("capSizes").appendChild(c); });
-function syncCap() { document.querySelectorAll("#capPresets .chip").forEach(c => c.classList.toggle("on", c.dataset.k === S.cap.preset)); document.querySelectorAll("#capSizes .chip").forEach(c => c.classList.toggle("on", c.dataset.k === S.cap.size)); }
+let CAP_LANGS = [["auto", "Auto (as spoken)"], ["en", "English"], ["hi", "हिन्दी Hindi"], ["kn", "ಕನ್ನಡ Kannada"], ["ta", "தமிழ் Tamil"], ["te", "తెలుగు Telugu"], ["bn", "বাংলা Bengali"], ["es", "Español Spanish"]];
+function drawCapLangs() {
+  $("capLangs").innerHTML = "";
+  CAP_LANGS.forEach(([k, l]) => { const c = document.createElement("button"); c.className = "chip"; c.dataset.k = k; c.textContent = l; c.onclick = () => pickCapLang(k); $("capLangs").appendChild(c); });
+  syncCap();
+}
+async function pickCapLang(k) {
+  S.cap.language = k; syncCap();
+  if (S.jobId && !(S.job && S.job.busy)) { try { await api(`/jobs/${S.jobId}/caption-style`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(S.cap) }); } catch (e) { toast(e.message, "bad"); } }
+}
+api("/caption-languages").then(r => { CAP_LANGS = [["auto", "Auto (as spoken)"], ...r.languages.map(l => [l.code, l.native === l.name ? l.name : `${l.native} ${l.name}`])]; drawCapLangs(); }).catch(() => drawCapLangs());
+$("capLangApply").onclick = async () => {
+  if (!confirm("Captions is language mein dobara bante hain. Tumhare manual caption edits hat jayenge. Continue?")) return;
+  try { S.job = await api(`/jobs/${S.jobId}/captions/regenerate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ language: S.cap.language }) }); S.hasOutput = false; capSig = ""; toast("Captions nayi language mein ban rahe hain…", "ok"); renderJob(); poll(); }
+  catch (e) { toast(e.message, "bad"); }
+};
+function syncCap() {
+  document.querySelectorAll("#capLangs .chip").forEach(c => c.classList.toggle("on", c.dataset.k === S.cap.language)); document.querySelectorAll("#capPresets .chip").forEach(c => c.classList.toggle("on", c.dataset.k === S.cap.preset)); document.querySelectorAll("#capSizes .chip").forEach(c => c.classList.toggle("on", c.dataset.k === S.cap.size)); }
 syncCap();
 
 /* ---------------- chat revise ---------------- */
@@ -744,7 +765,7 @@ $("clipList").addEventListener("change", ev => {
 let capSig = "";
 function renderCapEditor() {
   const ok = !!S.edl, caps = (S.edl && S.edl.captions) || [], box = $("capEditor");
-  $("capApply").disabled = $("capAdd").disabled = !ok; $("capRegen").disabled = !ok;
+  $("capApply").disabled = $("capAdd").disabled = !ok; $("capRegen").disabled = !ok; $("capLangApply").disabled = !ok;
   if (!ok) { box.innerHTML = `<p class="dim" style="font-size:12px">Pehle video edit hone do (Prompt tab → Edit video).</p>`; capSig = ""; return; }
   const sig = S.jobId + JSON.stringify(caps.map(c => [c.start, c.end, c.text]));
   if (sig === capSig || box.contains(document.activeElement)) return; capSig = sig; drawCapRows(caps);

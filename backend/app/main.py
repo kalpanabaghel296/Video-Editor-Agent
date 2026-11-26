@@ -37,6 +37,7 @@ from .analysis import takes as takes_mod
 from .analysis.pipeline import load_analysis
 from .editing import reframe as reframe_mod
 from .editing.captions import transcript_to_captions, write_srt, write_vtt
+from .editing.languages import LANGUAGES, normalize as norm_lang
 from .models.edl import EDL, Look
 from .models.transcript import Segment, Transcript, Word
 from .services import clips as clips_mod
@@ -229,7 +230,7 @@ async def create_job(file: List[UploadFile] = File(...), instruction: Optional[s
     if caption_style:
         try:
             cs = json.loads(caption_style)
-            put_caption_style(job_id, CaptionStyleIn(preset=cs.get("preset"), size=cs.get("size")))
+            put_caption_style(job_id, CaptionStyleIn(preset=cs.get("preset"), size=cs.get("size"), language=cs.get("language")))
         except HTTPException:
             raise
         except Exception:
@@ -470,6 +471,7 @@ def chat(job_id: str, body: ChatIn):
 class CaptionStyleIn(BaseModel):
     preset: Optional[str] = None        # classic | hormozi | minimal | boxed | karaoke | auto/None = let the prompt decide
     size: Optional[str] = None          # small | normal | large | auto/None
+    language: Optional[str] = None      # hi | kn | ta | te | bn | es | en ; auto/None = captions as spoken
 
 
 @app.put("/api/jobs/{job_id}/caption-style")
@@ -485,6 +487,10 @@ def put_caption_style(job_id: str, body: CaptionStyleIn):
         if body.size not in ("small", "normal", "large"):
             raise HTTPException(400, "size must be small|normal|large")
         out["size"] = body.size
+    if body.language and body.language != "auto":
+        if norm_lang(body.language) is None:
+            raise HTTPException(400, "caption language must be one of: " + ", ".join(l["code"] for l in LANGUAGES))
+        out["language"] = norm_lang(body.language)
     assets = store.path(job_id) / "assets"
     assets.mkdir(exist_ok=True)
     f = assets / "caption_style.json"
@@ -798,21 +804,39 @@ def edit_captions(job_id: str, body: CapEditIn):
     if not (store.path(job_id) / "edl.json").exists():
         raise HTTPException(404, "Pehle ek baar video edit karo - phir captions edit hote hain.")
     if body.preset or body.size:
-        put_caption_style(job_id, CaptionStyleIn(preset=body.preset or get_caption_style(job_id).get("preset"),
-                                                 size=body.size or get_caption_style(job_id).get("size")))
+        cur = get_caption_style(job_id)
+        put_caption_style(job_id, CaptionStyleIn(preset=body.preset or cur.get("preset"), size=body.size or cur.get("size"),
+                                                 language=cur.get("language")))
     _submit(job_id, loop.rerender_captions, store, job_id, [c.model_dump() for c in body.captions], False)
     return store.load(job_id)
 
 
+class RegenIn(BaseModel):
+    language: Optional[str] = None      # hi | kn | ta | te | bn | es | en | auto (= as spoken); omitted = keep the current language
+
+
+@app.get("/api/caption-languages")
+def caption_languages():
+    """The languages offered for captions (+ how translation will be done)."""
+    return {"languages": LANGUAGES, "translator": config.TRANSLATOR, "llm": config.LLM_PROVIDER}
+
+
 @app.post("/api/jobs/{job_id}/captions/regenerate")
-def regenerate_captions(job_id: str):
-    """Throw away manual edits and build the captions from the speech transcript again."""
+def regenerate_captions(job_id: str, body: Optional[RegenIn] = None):
+    """Throw away manual edits and build the captions again from the speech - optionally in another language."""
     _job(job_id)
+    lang = None
+    if body is not None and body.language is not None:
+        if body.language not in ("", "auto") and norm_lang(body.language) is None:
+            raise HTTPException(400, "caption language must be one of: " + ", ".join(l["code"] for l in LANGUAGES))
+        lang = "" if body.language in ("", "auto") else norm_lang(body.language)
+        put_caption_style(job_id, CaptionStyleIn(preset=get_caption_style(job_id).get("preset"),
+                                                 size=get_caption_style(job_id).get("size"), language=lang or "auto"))
     if job_id in _running:
         raise HTTPException(409, "job already running")
     if not (store.path(job_id) / "edl.json").exists():
         raise HTTPException(404, "Pehle ek baar video edit karo.")
-    _submit(job_id, loop.rerender_captions, store, job_id, None, True)
+    _submit(job_id, loop.rerender_captions, store, job_id, None, True, lang)
     return store.load(job_id)
 
 

@@ -17,6 +17,10 @@ WHISPER_PROMPT = os.getenv("WHISPER_PROMPT", "Hello guys, yeh video mein main AI
                            "Aap koi bhi video dalo, woh prompt se edit ho jayegi.")
 TRANSCRIBER = os.getenv("TRANSCRIBER", "auto")               # auto | faster-whisper | whisper | none
 
+# Caption language / translation
+TRANSLATOR = os.getenv("TRANSLATOR", "auto")                # auto (LLM if LLM_PROVIDER is set, else Google) | llm | google | none
+TRANSLATE_TIMEOUT = float(os.getenv("TRANSLATE_TIMEOUT", "20"))
+
 # Analysis
 SILENCE_DB = float(os.getenv("SILENCE_DB", "-35"))
 SILENCE_MIN = float(os.getenv("SILENCE_MIN", "0.5"))

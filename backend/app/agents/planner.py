@@ -243,6 +243,11 @@ def _assets(source_path: str) -> Path:
     return Path(source_path).parent.parent / "assets"
 
 
+def _cap_language(code):
+    from ..editing.languages import normalize
+    return normalize(code)
+
+
 def _ui_caption_style(source_path: str) -> dict:
     """caption look chosen in the UI (jobs/<id>/assets/caption_style.json); only non-default choices are stored"""
     f = _assets(source_path) / "caption_style.json"
@@ -444,7 +449,8 @@ def plan(req: Requirements, an: AnalysisBundle, source_path: str) -> EDL:
         caption_settings=CaptionSettings(
             enabled=req.caption_required, style="styled",
             preset=ui_cap.get("preset") or (req.caption_style if req.caption_style != "auto" else "classic"),
-            size=ui_cap.get("size") or req.caption_size, margin_pct=req.caption_margin),
+            size=ui_cap.get("size") or req.caption_size, margin_pct=req.caption_margin,
+            language=_cap_language(ui_cap.get("language") or req.caption_language)),
         requirements=req.model_dump(),
     )
     edl.project.duration = edl.timeline_duration()

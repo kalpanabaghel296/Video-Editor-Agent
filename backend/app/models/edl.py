@@ -119,6 +119,7 @@ class CaptionSettings(BaseModel):
     margin_pct: Optional[float] = None                 # distance from the bottom as a fraction of the height (platform safe zone)
     max_words: Optional[int] = None                    # words per caption block (None = preset default)
     font: Optional[str] = None                         # override; default is picked per preset / script (Devanagari -> Nirmala UI)
+    language: Optional[str] = None                     # caption language code (hi, kn, ta, te, bn, es, en); None = as spoken
 
 
 class Effect(BaseModel):

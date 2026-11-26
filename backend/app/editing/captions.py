@@ -184,13 +184,14 @@ def has_devanagari(text: str) -> bool:
     return any("\u0900" <= ch <= "\u097f" for ch in text)
 
 
-def pick_font(caps: List[Caption], style: dict, override: Optional[str] = None) -> str:
-    """Arial doesn't have Devanagari glyphs -> use Nirmala UI (ships with Windows) for Hindi script."""
+def pick_font(caps: List[Caption], style: dict, override: Optional[str] = None, language: Optional[str] = None) -> str:
+    """Arial has no Indic glyphs -> use a font of the script that is actually in the captions
+    (Windows: Nirmala UI for Hindi, Kannada, Tamil, Telugu, Bengali ...). Latin text keeps the preset's font."""
     if override:
         return override
-    if any(has_devanagari(c.text) for c in caps):
-        return "Nirmala UI"
-    return style["font"]
+    from .languages import detect_script, font_for_script, script_of
+    script = detect_script(" ".join(c.text for c in caps)) or (script_of(language) if language else None)
+    return font_for_script(script) or style["font"]
 
 
 def write_ass(caps: List[Caption], path: Path, width: int, height: int, settings=None) -> Path:
@@ -200,7 +201,7 @@ def write_ass(caps: List[Caption], path: Path, width: int, height: int, settings
     size = max(22, int(min(width, height) * st["size"] * SIZE_K.get(getattr(settings, "size", "normal"), 1.0)))
     default_margin = 0.18 if height > width else 0.12            # vertical video: stay clear of the app's UI
     margin_v = int(height * (getattr(settings, "margin_pct", None) or default_margin))
-    font = pick_font(caps, st, getattr(settings, "font", None))
+    font = pick_font(caps, st, getattr(settings, "font", None), getattr(settings, "language", None))
     head = (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {width}\nPlayResY: {height}\nWrapStyle: 0\n\n"

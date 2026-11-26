@@ -1,5 +1,6 @@
 """Week 2 / Day 1 — Whisper transcription (faster-whisper preferred, openai-whisper fallback)."""
 from pathlib import Path
+from typing import Optional
 from .. import config
 from ..models.transcript import Segment, Transcript, Word
 from ..utils.ffmpeg import run
@@ -39,7 +40,7 @@ def extract_audio(video: Path, wav: Path) -> Path:
     return wav
 
 
-def _faster_whisper(wav: Path, duration: float) -> Transcript:
+def _faster_whisper(wav: Path, duration: float, language: Optional[str] = None, native: bool = False) -> Transcript:
     from faster_whisper import WhisperModel      # type: ignore
     key = ("fw", config.WHISPER_MODEL)
     if key not in _MODELS:
@@ -54,10 +55,10 @@ def _faster_whisper(wav: Path, duration: float) -> Transcript:
         "condition_on_previous_text": False,
         "compression_ratio_threshold": 2.4,
         "no_speech_threshold": 0.6,
-        "initial_prompt": config.WHISPER_PROMPT or None,
+        "initial_prompt": None if native else (config.WHISPER_PROMPT or None),     # native: no Roman-script Hinglish bias
     }
-    if config.WHISPER_LANGUAGE:
-        kwargs["language"] = config.WHISPER_LANGUAGE
+    if language or config.WHISPER_LANGUAGE:
+        kwargs["language"] = language or config.WHISPER_LANGUAGE
     segs, info = _MODELS[key].transcribe(str(wav), **kwargs)
     out = []
     for s in segs:
@@ -69,7 +70,7 @@ def _faster_whisper(wav: Path, duration: float) -> Transcript:
     return Transcript(language=info.language, duration=duration, segments=out)
 
 
-def _openai_whisper(wav: Path, duration: float) -> Transcript:
+def _openai_whisper(wav: Path, duration: float, language: Optional[str] = None, native: bool = False) -> Transcript:
     import whisper                                # type: ignore
     key = ("ow", config.WHISPER_MODEL)
     if key not in _MODELS:
@@ -78,10 +79,10 @@ def _openai_whisper(wav: Path, duration: float) -> Transcript:
         "word_timestamps": True,
         "beam_size": config.WHISPER_BEAM,
         "condition_on_previous_text": False,
-        "initial_prompt": config.WHISPER_PROMPT or None,
+        "initial_prompt": None if native else (config.WHISPER_PROMPT or None),
     }
-    if config.WHISPER_LANGUAGE:
-        kwargs["language"] = config.WHISPER_LANGUAGE
+    if language or config.WHISPER_LANGUAGE:
+        kwargs["language"] = language or config.WHISPER_LANGUAGE
     res = _MODELS[key].transcribe(str(wav), **kwargs)
     out = []
     for s in res.get("segments", []):
@@ -105,5 +106,26 @@ def transcribe(video: Path, work_dir: Path, duration: float) -> Transcript:
         except ImportError as e:
             errors.append(f"{name}: not installed")
         except Exception as e:                    # model download / runtime failure
+            errors.append(f"{name}: {e}")
+    raise TranscriptionUnavailable("; ".join(errors) or "no transcriber configured")
+
+
+def transcribe_native(video: Path, work_dir: Path, duration: float, language: str) -> Transcript:
+    """Transcribe again in ONE language, written in that language's own script (Hindi -> Devanagari, Kannada -> Kannada ...).
+    The normal transcript is Roman-script Hinglish on purpose (see WHISPER_PROMPT); captions in a native script need this run."""
+    if config.TRANSCRIBER == "none":
+        raise TranscriptionUnavailable("TRANSCRIBER=none")
+    wav = work_dir / "audio.wav"
+    if not wav.exists():
+        wav = extract_audio(video, wav)
+    errors = []
+    for name, fn in (("faster-whisper", _faster_whisper), ("whisper", _openai_whisper)):
+        if config.TRANSCRIBER not in ("auto", name):
+            continue
+        try:
+            return fn(wav, duration, language=language, native=True)
+        except ImportError:
+            errors.append(f"{name}: not installed")
+        except Exception as e:
             errors.append(f"{name}: {e}")
     raise TranscriptionUnavailable("; ".join(errors) or "no transcriber configured")

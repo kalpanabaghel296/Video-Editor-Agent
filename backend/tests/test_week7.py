@@ -294,7 +294,7 @@ def test_caption_preset_details():
     safe = cap.write_ass(_caps("classic"), Path(tempfile.mkdtemp()) / "m.ass", 360, 640, CaptionSettings(margin_pct=0.22)).read_text(encoding="utf-8")
     assert safe.split("Style: Default,")[1].split("\n")[0].split(",")[-2] == str(int(640 * 0.22))
     hindi = [Caption(start=0, end=1, text="नमस्ते दोस्तों", words=[CaptionWord(text="नमस्ते", start=0, end=.5), CaptionWord(text="दोस्तों", start=.5, end=1)])]
-    assert "Nirmala UI" in cap.write_ass(hindi, Path(tempfile.mkdtemp()) / "d.ass", 360, 640).read_text(encoding="utf-8")
+    assert __import__("app.editing.languages", fromlist=["x"]).font_for_script("devanagari") in cap.write_ass(hindi, Path(tempfile.mkdtemp()) / "d.ass", 360, 640).read_text(encoding="utf-8")
 
 
 # ----------------------------------------------------------------------------- reference style

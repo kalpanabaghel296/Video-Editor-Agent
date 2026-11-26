@@ -54,6 +54,7 @@ class Requirements(BaseModel):
     # --- week 7 ---
     caption_style: Literal["auto", "classic", "hormozi", "minimal", "boxed", "karaoke"] = "auto"
     caption_size: Literal["small", "normal", "large"] = "normal"
+    caption_language: Optional[str] = None                  # "captions in Hindi" -> hi (the UI choice wins, see planner)
     caption_margin: Optional[float] = None                  # bottom safe zone (fraction of height), set by platform presets
     zoom_strength: Literal["subtle", "normal", "strong"] = "normal"
     reframe: Literal["auto", "face", "center", "blur"] = "auto"    # how a wide video is cropped for 9:16 / 1:1
@@ -312,6 +313,12 @@ def parse_rules(instruction: str) -> Requirements:
         r.caption_size = "small"
     elif re.search(r"\blarge captions\b|(?:big|bigger|large|larger)\s+(?:captions?|subtitles?)", t):
         r.caption_size = "large"
+    _L = r"(english|hindi|kannada|tamil|telugu|bengali|bangla|spanish)"
+    m = (re.search(r"(?:captions?|subtitles?)\s+(?:in|into|to)\s+" + _L, t) or re.search(r"(?:captions?|subtitles?)\s+" + _L + r"\s+(?:mein|me|main|language)", t)
+         or re.search(_L + r"\s+(?:captions?|subtitles?)", t))
+    if m:
+        r.caption_language = {"english": "en", "hindi": "hi", "kannada": "kn", "tamil": "ta", "telugu": "te", "bengali": "bn",
+                              "bangla": "bn", "spanish": "es"}[m.group(1)]
     # how a wide video becomes vertical / square
     if re.search(r"blur(?:red)?\s+(?:background|bg|fill|sides?|bars?)|background\s+blur|blurred?\s+(?:sides|bars)", t):
         r.reframe, r.fit = "blur", "pad"
@@ -458,7 +465,7 @@ def _understand(instruction: str, meta: VideoMetadata) -> Requirements:
                     req.target_duration = rules.target_duration
                     req.remove_silence, req.remove_fillers = rules.remove_silence, rules.remove_fillers
                 req.sfx = req.sfx or rules.sfx
-                for f, default in (("caption_style", "auto"), ("caption_size", "normal"),
+                for f, default in (("caption_style", "auto"), ("caption_size", "normal"), ("caption_language", None),
                                    ("zoom_strength", "normal"), ("reframe", "auto")):    # style words are rule-parsed
                     if getattr(rules, f) != default:
                         setattr(req, f, getattr(rules, f))

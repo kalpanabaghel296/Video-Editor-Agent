@@ -5,6 +5,7 @@ effect) and re-renders — it never restarts the whole job. After MAX_RETRIES th
 marked 'failed' with a clear reason.
 """
 import json
+from typing import List, Optional
 import shutil
 import traceback
 from ..analysis.pipeline import load_analysis, run_observe
@@ -13,7 +14,7 @@ from ..editing.renderer import RenderError, render
 from ..services.jobs import JobStore
 from ..utils.errors import friendly
 from ..models.edl import EDL
-from . import captions_edit, director, inspector, planner, validator
+from . import caption_lang, captions_edit, director, inspector, planner, validator
 
 
 def _write_edl(jd, edl):
@@ -27,6 +28,13 @@ def ensure_observed(store: JobStore, job_id: str, force: bool = False) -> None:
                          on_progress=lambda st, s: store.log(job_id, f"  observe/{st}: {s}"))
     failed = [k for k, v in status.items() if v == "failed"]
     store.set_stage(job_id, "observe", "done", ("partial — " + ", ".join(failed) + " failed") if failed else "")
+
+
+def _finish_captions(edl: EDL, an, jd) -> None:
+    """Captions in the chosen language first, then the user's manual edits on top (they win while clips + language are unchanged)."""
+    for msg in (caption_lang.apply_language(edl, an, jd), captions_edit.apply_override(edl, jd)):
+        if msg and msg not in edl.warnings:
+            edl.warnings.append(msg)
 
 
 def run_agent(store: JobStore, job_id: str, instruction: str) -> None:
@@ -51,9 +59,7 @@ def run_agent(store: JobStore, job_id: str, instruction: str) -> None:
             for a in applied:
                 store.log(job_id, f"  patch: {a}")
             edl.explanation += [f"Auto-fixed: {a}" for a in applied]
-        msg = captions_edit.apply_override(edl, jd)           # manual caption edits survive a re-run (while the clips are the same)
-        if msg:
-            edl.warnings.append(msg)
+        _finish_captions(edl, an, jd)
         _write_edl(jd, edl)
         store.set_stage(job_id, "plan", "done", f"{len(edl.clips)} clips, {edl.project.duration:.1f}s")
 
@@ -83,7 +89,7 @@ def run_agent(store: JobStore, job_id: str, instruction: str) -> None:
             codes = {p.code for p in errs}
             if "OVER_TARGET" in codes:
                 edl, applied = validator.patch(edl, an.metadata, req, an.transcript)
-                captions_edit.apply_override(edl, jd)
+                _finish_captions(edl, an, jd)
                 _write_edl(jd, edl)
             if "ASPECT_MISMATCH" in codes:
                 edl.project.fit = "crop"
@@ -115,33 +121,42 @@ def run_agent(store: JobStore, job_id: str, instruction: str) -> None:
 
 
 
-def rerender_captions(store: JobStore, job_id: str, items=None, regenerate: bool = False) -> None:
-    """Caption-only update: new / edited / deleted caption lines (or a new caption look) are burned into the EXISTING plan.
-    Clips, cuts and length stay exactly as they are and the slow first render pass is skipped when possible."""
+def rerender_captions(store: JobStore, job_id: str, items=None, regenerate: bool = False, language: Optional[str] = None) -> None:
+    """Caption-only update: new / edited / deleted caption lines, or captions rebuilt (optionally in another language), are burned
+    into the EXISTING plan. Clips, cuts and length stay exactly as they are and the slow first render pass is skipped when possible."""
     jd = store.path(job_id)
     try:
         store.update(job_id, busy=True, error=None)
         edl = EDL(**json.loads((jd / "edl.json").read_text(encoding="utf-8")))
-        if regenerate:
-            from ..editing.captions import build_captions
-            an = load_analysis(jd)
-            edl.captions = build_captions(edl.clips, an.transcript, edl.caption_settings)
-            captions_edit.clear(jd)
-        elif items is not None:
-            edl.captions = captions_edit.build(items, edl)
-            captions_edit.save(jd, edl, edl.captions)
         ui = planner._ui_caption_style(str(store.source_file(job_id)))          # caption look picked in the UI
         if ui.get("preset"):
             edl.caption_settings.preset = ui["preset"]
         if ui.get("size"):
             edl.caption_settings.size = ui["size"]
+        warn: List[str] = []
+        if regenerate:
+            from ..editing.captions import build_captions
+            from ..editing.languages import normalize
+            an = load_analysis(jd)
+            if language is not None:                                             # "" / "auto" = as spoken
+                edl.caption_settings.language = normalize(language)
+            edl.caption_settings.enabled = True
+            edl.captions = build_captions(edl.clips, an.transcript, edl.caption_settings)
+            captions_edit.clear(jd)
+            msg = caption_lang.apply_language(edl, an, jd)
+            if msg:
+                warn.append(msg)
+        elif items is not None:
+            edl.captions = captions_edit.build(items, edl)
+            captions_edit.save(jd, edl, edl.captions)
         edl.caption_settings.enabled = bool(edl.captions)
+        edl.warnings = [w for w in edl.warnings if not w.startswith(("Captions ", "Clips / timing", "Captions-"))] + warn
         store.set_stage(job_id, "act", "running", "captions only")
         result = render(edl, jd, level=0, captions_only=True)
         store.set_stage(job_id, "act", "done", "; ".join(result.warnings))
         store.set_stage(job_id, "export", "running")
         shutil.copy(result.path, jd / "output" / "final.mp4")
-        edl.explanation = [x for x in edl.explanation if not (x.startswith(("Used your", "Captions updated")) or
+        edl.explanation = [x for x in edl.explanation if not (x.startswith(("Used your", "Captions updated", "Captions language")) or
                                                              (x.startswith("Added ") and "caption block" in x))]
         edl.explanation.append(f"Captions updated: {len(edl.captions)} line(s)")
         _write_edl(jd, edl)
